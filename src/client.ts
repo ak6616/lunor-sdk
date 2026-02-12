@@ -1,534 +1,638 @@
+// src/client.ts
+
 import {
-  LogVaultConfig,
+  type LunorConfig,
+  type WebhookPayload,
+  type LogPayload,
+  type ErrorPayload,
+  type DebugPayload,
+  type SecurityPayload,
+  type MiddlewareFn,
+  type PerformanceMark,
+  type SDKState,
   LogLevel,
   ErrorType,
   Severity,
   SecurityType,
-  Metadata,
-  WebhookPayload,
-  WebhookResponse,
-  LogPayload,
-  ErrorPayload,
-  DebugPayload,
-  SecurityPayload,
-  LogContext,
 } from "./types";
-import { HttpTransport } from "./transports/http";
-import { BatchTransport } from "./transports/batch";
-import { OfflineQueue } from "./transports/offline-queue";
-import { ContextManager } from "./context/context-manager";
-import { Sanitizer } from "./utils/sanitizer";
-import { PerformanceMonitor } from "./interceptors/performance";
-import { setupGlobalErrorHandler } from "./interceptors/global-error";
-import { setupConsoleInterceptor } from "./interceptors/console";
-import { generateErrorFingerprint } from "./utils/fingerprint";
+import {
+  DEFAULT_CONFIG,
+  LOG_LEVEL_PRIORITY,
+  LUNOR_ENDPOINT,
+  SDK_VERSION,
+} from "./constants";
+import { Transport } from "./transport";
+import { PersistentQueue } from "./queue";
+import { MiddlewareChain } from "./middleware";
+import { collectContext } from "./context";
+import { installGlobalHandlers } from "./global-handlers";
+import {
+  createInternalLogger,
+  generateId,
+  nowISO,
+  extractStack,
+  truncate,
+} from "./utils";
 
-const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
-  DEBUG: 0,
-  INFO: 1,
-  WARN: 2,
-  ERROR: 3,
-  FATAL: 4,
-};
+export class LunorClient {
+  // ---- Private fields ----
+  private config: Required<LunorConfig> & LunorConfig;
+  private transport: Transport;
+  private queue: PersistentQueue;
+  private middlewareChain: MiddlewareChain;
+  private logger: ReturnType<typeof createInternalLogger>;
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private globalHandlersCleanup: { uninstall: () => void } | null = null;
+  private performanceMarks: Map<string, PerformanceMark> = new Map();
+  private _state: SDKState = "idle";
+  private _eventCount = 0;
+  private _flushCount = 0;
+  private _errorCount = 0;
 
-export class LogVaultClient {
-  private config: LogVaultConfig;
-  private http: HttpTransport;
-  private batch: BatchTransport | null = null;
-  private offlineQueue: OfflineQueue | null = null;
-  private contextManager: ContextManager;
-  private sanitizer: Sanitizer;
-  private cleanupFns: (() => void)[] = [];
-  private _performance: PerformanceMonitor;
-  private _isOnline = true;
-  private _initialized = false;
+  constructor(config: LunorConfig) {
+    if (!config.apiKey || !config.apiSecret) {
+      throw new Error("[Lunor] apiKey and apiSecret are required");
+    }
 
-  constructor(config: LogVaultConfig) {
-    this.validateConfig(config);
-
+    // Merge config with defaults
     this.config = {
-      minLevel: "DEBUG",
-      sanitize: true,
-      enableBatching: false,
-      batchInterval: 5000,
-      batchSize: 50,
-      maxRetries: 3,
-      retryDelay: 1000,
-      timeout: 10000,
-      enableOfflineQueue: false,
-      maxOfflineQueueSize: 500,
-      debug: false,
+      ...DEFAULT_CONFIG,
       ...config,
-    };
+    } as Required<LunorConfig> & LunorConfig;
 
-    this.http = new HttpTransport(this.config);
-    this.contextManager = new ContextManager();
-    this.sanitizer = new Sanitizer(this.config.sensitiveFields);
-    this._performance = new PerformanceMonitor(this);
-
-    // Set up batching
-    if (this.config.enableBatching) {
-      this.batch = new BatchTransport(this.config, this.http);
+    if (
+      config.endpoint &&
+      config.endpoint !== LUNOR_ENDPOINT &&
+      this.config.environment === "production"
+    ) {
+      console.warn(
+        "[Lunor] Custom endpoint is not allowed in production. Using default.",
+      );
+      this.config.endpoint = LUNOR_ENDPOINT;
     }
 
-    // Set up offline queue
-    if (this.config.enableOfflineQueue) {
-      this.offlineQueue = new OfflineQueue(this.config, this.http);
-      this.setupConnectivityListeners();
-    }
+    this.logger = createInternalLogger(this.config.debug);
+    this.transport = new Transport(this.config, this.logger);
+    this.middlewareChain = new MiddlewareChain();
 
-    // Auto-setup interceptors
-    if (this.config.captureGlobalErrors) {
-      const cleanup = setupGlobalErrorHandler(this);
-      this.cleanupFns.push(cleanup);
-    }
-
-    if (this.config.interceptConsole) {
-      const cleanup = setupConsoleInterceptor(this);
-      this.cleanupFns.push(cleanup);
-    }
-
-    // Set global metadata
-    if (this.config.environment || this.config.release) {
-      this.contextManager.setGlobalContext({
-        extra: {
-          ...(this.config.environment && {
-            environment: this.config.environment,
-          }),
-          ...(this.config.release && { release: this.config.release }),
-        },
-      });
-    }
-
-    this._initialized = true;
-
-    if (this.config.debug) {
-      console.debug("[LogVault] SDK initialized", {
-        endpoint: this.config.endpoint,
-        batching: this.config.enableBatching,
-        offlineQueue: this.config.enableOfflineQueue,
-      });
-    }
-  }
-
-  // ============================================================
-  // Public API — Logging
-  // ============================================================
-
-  /**
-   * Send a log entry
-   */
-  async log(
-    message: string,
-    options: {
-      level?: LogLevel;
-      metadata?: Metadata;
-      source?: string;
-    } = {},
-  ): Promise<WebhookResponse | null> {
-    const level = options.level || "INFO";
-
-    if (!this.shouldLog(level)) return null;
-
-    const payload: WebhookPayload = {
-      type: "log",
-      data: {
-        level,
-        message,
-        metadata: this.enrichMetadata(options.metadata),
-        source: options.source || this.config.defaultSource,
-        timestamp: new Date().toISOString(),
-      } satisfies LogPayload,
-    };
-
-    return this.send(payload);
-  }
-
-  /** Convenience: DEBUG level */
-  async trace(
-    message: string,
-    metadata?: Metadata,
-  ): Promise<WebhookResponse | null> {
-    return this.log(message, { level: "DEBUG", metadata });
-  }
-
-  /** Convenience: INFO level */
-  async info(
-    message: string,
-    metadata?: Metadata,
-  ): Promise<WebhookResponse | null> {
-    return this.log(message, { level: "INFO", metadata });
-  }
-
-  /** Convenience: WARN level */
-  async warn(
-    message: string,
-    metadata?: Metadata,
-  ): Promise<WebhookResponse | null> {
-    return this.log(message, { level: "WARN", metadata });
-  }
-
-  /** Convenience: ERROR level */
-  async error(
-    message: string,
-    metadata?: Metadata,
-  ): Promise<WebhookResponse | null> {
-    return this.log(message, { level: "ERROR", metadata });
-  }
-
-  /** Convenience: FATAL level */
-  async fatal(
-    message: string,
-    metadata?: Metadata,
-  ): Promise<WebhookResponse | null> {
-    return this.log(message, { level: "FATAL", metadata });
-  }
-
-  // ============================================================
-  // Public API — Error Tracking
-  // ============================================================
-
-  /**
-   * Capture and report an error/exception
-   */
-  async captureException(
-    error: Error | string,
-    options: {
-      type?: ErrorType;
-      severity?: Severity;
-      metadata?: Metadata;
-    } = {},
-  ): Promise<WebhookResponse | null> {
-    const err = typeof error === "string" ? new Error(error) : error;
-    const errorType = options.type || this.classifyError(err);
-    const severity = options.severity || "MEDIUM";
-    const fingerprint = generateErrorFingerprint(
-      err.message,
-      err.stack,
-      errorType,
+    this.queue = new PersistentQueue(
+      this.config.maxQueueSize,
+      `${this.config.persistencePrefix}queue`,
+      this.config.enablePersistence,
+      this.logger,
     );
 
-    const payload: WebhookPayload = {
-      type: "error",
+    this._state = "initializing";
+    this.logger.info(`Lunor SDK v${SDK_VERSION} initializing...`);
+
+    // Install global handlers
+    this.globalHandlersCleanup = installGlobalHandlers(this, {
+      captureErrors: this.config.captureGlobalErrors,
+      captureRejections: this.config.captureUnhandledRejections,
+      captureConsole: this.config.captureConsole,
+      consoleLevels: this.config.captureConsoleLevels,
+    });
+
+    // Start flush timer
+    this.startFlushTimer();
+
+    // Install beforeunload handler (browser) or process exit (node)
+    this.installShutdownHandler();
+
+    this._state = "ready";
+    this.logger.info("Lunor SDK ready");
+    this.config.onReady?.();
+  }
+
+  // ==========================================================================
+  // PUBLIC API — Logging
+  // ==========================================================================
+
+  /**
+   * Send a log event
+   */
+  log(data: LogPayload | string): void {
+    const payload: LogPayload =
+      typeof data === "string" ? { level: LogLevel.INFO, message: data } : data;
+
+    if (!this.shouldSendLogLevel(payload.level || LogLevel.INFO)) return;
+
+    this.enqueue({
+      type: "log",
       data: {
-        type: errorType,
-        message: err.message,
-        stack: err.stack || null,
-        severity,
-        metadata: this.enrichMetadata({
-          ...options.metadata,
-          _fingerprint: fingerprint,
-          _errorName: err.name,
-        }),
-        timestamp: new Date().toISOString(),
-      } satisfies ErrorPayload,
+        ...payload,
+        level: payload.level || LogLevel.INFO,
+        source: payload.source || this.config.defaultSource,
+        timestamp: payload.timestamp || nowISO(),
+      },
+    });
+  }
+
+  /** Shortcut: DEBUG level log */
+  debug(message: string, metadata?: Record<string, unknown>): void {
+    this.log({ level: LogLevel.DEBUG, message, metadata });
+  }
+
+  /** Shortcut: INFO level log */
+  info(message: string, metadata?: Record<string, unknown>): void {
+    this.log({ level: LogLevel.INFO, message, metadata });
+  }
+
+  /** Shortcut: WARN level log */
+  warn(message: string, metadata?: Record<string, unknown>): void {
+    this.log({ level: LogLevel.WARN, message, metadata });
+  }
+
+  /** Shortcut: ERROR level log (as log, not error event) */
+  errorLog(message: string, metadata?: Record<string, unknown>): void {
+    this.log({ level: LogLevel.ERROR, message, metadata });
+  }
+
+  /** Shortcut: FATAL level log — immediately flushes */
+  fatal(message: string, metadata?: Record<string, unknown>): void {
+    this.log({ level: LogLevel.FATAL, message, metadata });
+    this.flush();
+  }
+
+  // ==========================================================================
+  // PUBLIC API — Errors
+  // ==========================================================================
+
+  /**
+   * Capture an error event
+   */
+  captureError(data: ErrorPayload | Error | string): void {
+    let payload: ErrorPayload;
+
+    if (typeof data === "string") {
+      payload = { message: data, severity: Severity.MEDIUM };
+    } else if (data instanceof Error) {
+      payload = {
+        type: ErrorType.RUNTIME,
+        message: data.message,
+        stack: extractStack(data),
+        severity: Severity.MEDIUM,
+        metadata: { name: data.name },
+      };
+    } else {
+      payload = data;
+    }
+
+    const finalPayload: ErrorPayload = {
+      ...payload,
+      type: payload.type || ErrorType.UNKNOWN,
+      severity: payload.severity || Severity.MEDIUM,
+      message: truncate(payload.message),
+      stack: payload.stack ? truncate(payload.stack) : undefined,
+      timestamp: payload.timestamp || nowISO(),
     };
 
-    return this.send(payload);
+    this.enqueue({ type: "error", data: finalPayload });
+
+    // Auto-flush for critical errors
+    if (finalPayload.severity === Severity.CRITICAL) {
+      this.flush();
+    }
   }
 
   /**
-   * Wrap an async function with automatic error capturing
+   * Shortcut: capture an Error object
    */
-  wrapAsync<T extends (...args: unknown[]) => Promise<unknown>>(
-    fn: T,
-    options?: { severity?: Severity; metadata?: Metadata },
-  ): T {
-    const self = this;
-    return async function (this: unknown, ...args: unknown[]) {
-      try {
-        return await fn.apply(this, args);
-      } catch (error) {
-        await self.captureException(
-          error instanceof Error ? error : new Error(String(error)),
-          options,
-        );
-        throw error; // Re-throw
-      }
-    } as T;
+  captureException(
+    error: Error,
+    extra?: { severity?: Severity; metadata?: Record<string, unknown> },
+  ): void {
+    this.captureError({
+      type: ErrorType.RUNTIME,
+      message: error.message,
+      stack: extractStack(error),
+      severity: extra?.severity || Severity.MEDIUM,
+      metadata: {
+        name: error.name,
+        ...extra?.metadata,
+      },
+    });
   }
 
-  // ============================================================
-  // Public API — Debug
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Debug
+  // ==========================================================================
 
   /**
-   * Send debug/diagnostic data
+   * Send a debug/diagnostic event
    */
-  async debug(options: {
-    type?: string;
-    data?: Metadata;
-    performance?: Metadata;
-  }): Promise<WebhookResponse | null> {
-    const payload: WebhookPayload = {
+  captureDebug(data: DebugPayload): void {
+    this.enqueue({
       type: "debug",
       data: {
-        type: options.type || "debug",
-        data: this.enrichMetadata(options.data),
-        performance: options.performance,
-        timestamp: new Date().toISOString(),
-      } satisfies DebugPayload,
-    };
-
-    return this.send(payload);
+        ...data,
+        type: data.type || "unknown",
+        timestamp: data.timestamp || nowISO(),
+      },
+    });
   }
 
-  // ============================================================
-  // Public API — Security
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Security
+  // ==========================================================================
 
   /**
    * Report a security event
    */
-  async security(options: {
-    type?: SecurityType;
-    description: string;
-    ipAddress?: string;
-    userAgent?: string;
-    country?: string;
-    metadata?: Metadata;
-  }): Promise<WebhookResponse | null> {
-    const payload: WebhookPayload = {
+  captureSecurityEvent(data: SecurityPayload): void {
+    this.enqueue({
       type: "security",
       data: {
-        type: options.type || "SUSPICIOUS_ACTIVITY",
-        description: options.description,
-        ipAddress: options.ipAddress,
-        userAgent: options.userAgent,
-        country: options.country,
-        metadata: this.enrichMetadata(options.metadata),
-      } satisfies SecurityPayload,
-    };
+        ...data,
+        type: data.type || SecurityType.SUSPICIOUS_ACTIVITY,
+      },
+    });
 
-    return this.send(payload);
+    // Security events are always flushed immediately
+    this.flush();
   }
 
-  // ============================================================
-  // Public API — Context
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Performance
+  // ==========================================================================
 
   /**
-   * Set global context (attached to every event)
+   * Start a performance measurement
    */
-  setContext(ctx: Partial<LogContext>): void {
-    this.contextManager.setGlobalContext(ctx);
-  }
-
-  /**
-   * Set user info
-   */
-  setUser(userId: string, extra?: Metadata): void {
-    this.contextManager.setGlobalContext({
-      userId,
-      extra,
+  startTimer(name: string, metadata?: Record<string, unknown>): void {
+    this.performanceMarks.set(name, {
+      name,
+      startTime: performance.now(),
+      metadata,
     });
   }
 
   /**
-   * Start a scoped context (e.g., for a request)
+   * Stop a performance measurement and optionally send as debug event
    */
-  pushScope(ctx: LogContext): void {
-    this.contextManager.pushScope(ctx);
+  stopTimer(name: string, sendAsDebug = true): PerformanceMark | null {
+    const mark = this.performanceMarks.get(name);
+    if (!mark) {
+      this.logger.warn(`Performance mark "${name}" not found`);
+      return null;
+    }
+
+    mark.endTime = performance.now();
+    mark.duration = mark.endTime - mark.startTime;
+    this.performanceMarks.delete(name);
+
+    if (sendAsDebug) {
+      this.captureDebug({
+        type: "performance",
+        data: { name: mark.name, ...mark.metadata },
+        performance: {
+          duration: Math.round(mark.duration * 100) / 100,
+          startTime: mark.startTime,
+          endTime: mark.endTime,
+        },
+      });
+    }
+
+    return mark;
   }
 
   /**
-   * End the current scope
+   * Measure an async function's execution time
    */
-  popScope(): void {
-    this.contextManager.popScope();
-  }
-
-  /**
-   * Execute a function within a scoped context
-   */
-  async withScope<T>(ctx: LogContext, fn: () => Promise<T>): Promise<T> {
-    this.pushScope(ctx);
+  async measure<T>(
+    name: string,
+    fn: () => Promise<T>,
+    metadata?: Record<string, unknown>,
+  ): Promise<T> {
+    this.startTimer(name, metadata);
     try {
-      return await fn();
-    } finally {
-      this.popScope();
+      const result = await fn();
+      this.stopTimer(name);
+      return result;
+    } catch (error) {
+      const mark = this.stopTimer(name, false);
+      this.captureError({
+        type: ErrorType.RUNTIME,
+        message: `Performance measurement "${name}" failed: ${(error as Error).message}`,
+        stack: (error as Error).stack,
+        severity: Severity.MEDIUM,
+        metadata: {
+          ...metadata,
+          duration: mark?.duration,
+        },
+      });
+      throw error;
     }
   }
 
-  // ============================================================
-  // Public API — Performance
-  // ============================================================
-
-  get performance(): PerformanceMonitor {
-    return this._performance;
-  }
-
-  // ============================================================
-  // Public API — Lifecycle
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Middleware
+  // ==========================================================================
 
   /**
-   * Flush all pending events
+   * Add a middleware that processes events before they're queued
    */
-  async flush(): Promise<void> {
-    if (this.batch) {
-      await this.batch.flush();
-    }
-    if (this.offlineQueue && this._isOnline) {
-      await this.offlineQueue.drain();
-    }
+  use(middleware: MiddlewareFn): this {
+    this.middlewareChain.use(middleware);
+    return this;
+  }
+
+  // ==========================================================================
+  // PUBLIC API — Context
+  // ==========================================================================
+
+  /**
+   * Update global context (merged with existing)
+   */
+  setContext(context: Record<string, unknown>): void {
+    this.config.globalContext = {
+      ...(this.config.globalContext || {}),
+      ...context,
+    };
   }
 
   /**
-   * Destroy the client — flush and clean up
+   * Set a tag
+   */
+  setTag(key: string, value: string): void {
+    if (!this.config.tags) this.config.tags = {};
+    this.config.tags[key] = value;
+  }
+
+  /**
+   * Set the user context
+   */
+  setUser(user: {
+    id?: string;
+    email?: string;
+    name?: string;
+    [key: string]: unknown;
+  }): void {
+    this.setContext({ user });
+  }
+
+  // ==========================================================================
+  // PUBLIC API — Flush & Lifecycle
+  // ==========================================================================
+
+  /**
+   * Force an immediate flush of the queue
+   */
+  async forceFlush(): Promise<void> {
+    await this.flush();
+  }
+
+  /**
+   * Get SDK stats
+   */
+  getStats() {
+    return {
+      state: this._state,
+      queueSize: this.queue.size,
+      totalEvents: this._eventCount,
+      totalFlushes: this._flushCount,
+      totalErrors: this._errorCount,
+      sdkVersion: SDK_VERSION,
+    };
+  }
+
+  /**
+   * Destroy the SDK instance — flushes remaining events and cleans up
    */
   async destroy(): Promise<void> {
-    if (this.config.debug) {
-      console.debug("[LogVault] Destroying client...");
+    this.logger.info("Destroying Lunor SDK...");
+    this._state = "destroyed";
+
+    // Stop timers
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
     }
 
-    // Flush remaining
+    // Uninstall global handlers
+    this.globalHandlersCleanup?.uninstall();
+
+    // Final flush
     await this.flush();
 
-    // Destroy batch transport
-    if (this.batch) {
-      this.batch.destroy();
-    }
-
-    // Remove interceptors
-    for (const cleanup of this.cleanupFns) {
-      cleanup();
-    }
-
-    this._initialized = false;
+    this.logger.info("Lunor SDK destroyed");
   }
 
-  // ============================================================
-  // Internal
-  // ============================================================
+  // ==========================================================================
+  // INTERNAL METHODS
+  // ==========================================================================
 
-  private validateConfig(config: LogVaultConfig): void {
-    if (!config.apiKey) throw new Error("[LogVault] apiKey is required");
-    if (!config.apiSecret) throw new Error("[LogVault] apiSecret is required");
-    if (!config.endpoint) throw new Error("[LogVault] endpoint is required");
-  }
-
-  private shouldLog(level: LogLevel): boolean {
-    const minPriority = LOG_LEVEL_PRIORITY[this.config.minLevel || "DEBUG"];
-    const currentPriority = LOG_LEVEL_PRIORITY[level];
+  private shouldSendLogLevel(level: LogLevel): boolean {
+    const minPriority = LOG_LEVEL_PRIORITY[this.config.minLogLevel] ?? 0;
+    const currentPriority = LOG_LEVEL_PRIORITY[level] ?? 0;
     return currentPriority >= minPriority;
   }
 
-  private enrichMetadata(metadata?: Metadata): Metadata {
-    const contextMeta = this.contextManager.getContextAsMetadata();
-    const globalMeta = this.config.globalMetadata || {};
+  private shouldSample(): boolean {
+    if (this.config.sampleRate >= 1.0) return true;
+    if (this.config.sampleRate <= 0.0) return false;
+    return Math.random() < this.config.sampleRate;
+  }
 
-    const merged: Metadata = {
-      ...globalMeta,
-      ...contextMeta,
-      ...metadata,
+  private async enqueue(payload: WebhookPayload): Promise<void> {
+    if (this._state === "destroyed") {
+      this.logger.warn("SDK destroyed, dropping event");
+      return;
+    }
+
+    // Sampling
+    if (!this.shouldSample()) {
+      this.logger.debug("Event dropped by sampling");
+      return;
+    }
+
+    // Enrich with metadata
+    payload._meta = {
+      sdkVersion: SDK_VERSION,
+      timestamp: nowISO(),
+      context: {
+        ...collectContext(this.config),
+        ...(this.config.globalContext
+          ? {
+              tags: {
+                ...(this.config.tags || {}),
+                ...(this.config.globalContext as Record<string, string>),
+              },
+            }
+          : {}),
+      },
     };
 
-    if (this.config.sanitize) {
-      return this.sanitizer.sanitizeMetadata(merged) || merged;
-    }
-
-    return merged;
-  }
-
-  private classifyError(error: Error): ErrorType {
-    const name = error.name?.toLowerCase() || "";
-    const message = error.message?.toLowerCase() || "";
-
-    if (name.includes("type") || message.includes("is not a function"))
-      return "TYPE";
-    if (name.includes("reference") || message.includes("is not defined"))
-      return "REFERENCE";
-    if (name.includes("syntax")) return "SYNTAX";
-    if (name.includes("range")) return "RUNTIME";
-    if (message.includes("timeout") || message.includes("timed out"))
-      return "TIMEOUT";
-    if (
-      message.includes("network") ||
-      message.includes("fetch") ||
-      message.includes("econnrefused")
-    )
-      return "NETWORK";
-    if (message.includes("unauthorized") || message.includes("401"))
-      return "AUTHENTICATION";
-    if (message.includes("forbidden") || message.includes("403"))
-      return "AUTHORIZATION";
-    if (message.includes("validation") || message.includes("invalid"))
-      return "VALIDATION";
-    if (
-      message.includes("database") ||
-      message.includes("prisma") ||
-      message.includes("sql")
-    )
-      return "DATABASE";
-    if (message.includes("memory") || message.includes("heap")) return "MEMORY";
-
-    return "UNKNOWN";
-  }
-
-  private async send(payload: WebhookPayload): Promise<WebhookResponse | null> {
-    if (!this._initialized) return null;
-
-    // Apply beforeSend hook
+    // Run beforeSend hook
     if (this.config.beforeSend) {
-      const result = await this.config.beforeSend(payload);
-      if (result === false) {
-        if (this.config.debug) {
-          console.debug("[LogVault] Event dropped by beforeSend hook");
+      try {
+        const result = await this.config.beforeSend(payload);
+        if (result === false) {
+          this.logger.debug("Event dropped by beforeSend hook");
+          return;
         }
-        return null;
+        payload = result;
+      } catch (error) {
+        this.logger.error("beforeSend hook error:", error);
       }
-      payload = result;
     }
+
+    // Run middleware chain
+    if (this.middlewareChain.count > 0) {
+      const processed = await this.middlewareChain.execute(payload);
+      if (!processed) {
+        this.logger.debug("Event dropped by middleware");
+        return;
+      }
+      payload = processed;
+    }
+
+    this.queue.enqueue(payload);
+    this._eventCount++;
+
+    this.logger.debug(
+      `Queued ${payload.type} event (queue: ${this.queue.size})`,
+    );
+
+    // Auto-flush if batch size reached
+    if (this.queue.size >= this.config.batchSize) {
+      this.flush();
+    }
+  }
+
+  private async flush(): Promise<void> {
+    if (this.queue.isEmpty) return;
+    if (this._state === "flushing") return;
+
+    const previousState = this._state;
+    this._state = "flushing";
+
+    const items = this.queue.dequeue(this.config.batchSize);
+    const payloads = items.map((item) => item.payload);
+
+    this.logger.debug(`Flushing ${payloads.length} events...`);
 
     try {
-      let response: WebhookResponse;
+      const results = await this.transport.sendBatch(payloads);
+      const failedItems = items.filter((_, index) => !results[index]?.success);
 
-      if (!this._isOnline && this.offlineQueue) {
-        this.offlineQueue.enqueue(payload);
-        return { success: true, id: "queued" };
+      if (failedItems.length > 0) {
+        // Requeue items that haven't exceeded max retries
+        const retriable = failedItems.filter(
+          (item) => item.retries < this.config.maxRetries,
+        );
+        const dropped = failedItems.filter(
+          (item) => item.retries >= this.config.maxRetries,
+        );
+
+        if (retriable.length > 0) {
+          this.queue.requeue(retriable);
+          this.logger.warn(`${retriable.length} events requeued for retry`);
+        }
+
+        if (dropped.length > 0) {
+          this._errorCount += dropped.length;
+          this.logger.error(
+            `${dropped.length} events permanently dropped after max retries`,
+          );
+          this.config.onFlushError?.(
+            new Error(`${dropped.length} events failed`),
+            dropped.map((i) => i.payload),
+          );
+        }
       }
 
-      if (this.batch) {
-        response = await this.batch.add(payload);
-      } else {
-        response = await this.http.send(payload);
+      const successCount = payloads.length - failedItems.length;
+      if (successCount > 0) {
+        this._flushCount++;
+        this.config.onFlushSuccess?.(successCount);
+        this.logger.debug(`Successfully flushed ${successCount} events`);
       }
-
-      this.config.onSuccess?.(response);
-      return response;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-
-      // If offline queue enabled and we failed, queue it
-      if (this.offlineQueue) {
-        this.offlineQueue.enqueue(payload);
-      }
-
-      this.config.onError?.(error, payload);
-
-      if (this.config.debug) {
-        console.error("[LogVault] Send failed:", error.message);
-      }
-
-      return null;
+    } catch (error) {
+      // Requeue all on catastrophic failure
+      this.queue.requeue(items);
+      this._errorCount++;
+      this.logger.error("Flush failed catastrophically:", error);
+      this.config.onFlushError?.(
+        error instanceof Error ? error : new Error(String(error)),
+        payloads,
+      );
+    } finally {
+      this._state = previousState === "destroyed" ? "destroyed" : "ready";
     }
   }
 
-  private setupConnectivityListeners(): void {
+  private startFlushTimer(): void {
+    this.flushTimer = setInterval(() => {
+      this.flush();
+    }, this.config.flushInterval);
+  }
+
+  private installShutdownHandler(): void {
     if (typeof window !== "undefined") {
-      window.addEventListener("online", () => {
-        this._isOnline = true;
-        if (this.config.debug)
-          console.debug("[LogVault] Back online — draining queue");
-        this.offlineQueue?.drain();
+      window.addEventListener("beforeunload", () => {
+        // Use sendBeacon for last-chance delivery
+        this.sendBeaconFlush();
       });
 
-      window.addEventListener("offline", () => {
-        this._isOnline = false;
-        if (this.config.debug)
-          console.debug("[LogVault] Offline — queueing events");
+      // Visibility change — flush when tab goes to background
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          this.sendBeaconFlush();
+        }
       });
+    }
+
+    if (typeof process !== "undefined" && process.on) {
+      const handler = () => {
+        this.flush();
+      };
+
+      process.on("beforeExit", handler);
+      process.on("SIGINT", async () => {
+        await this.destroy();
+        process.exit(0);
+      });
+      process.on("SIGTERM", async () => {
+        await this.destroy();
+        process.exit(0);
+      });
+    }
+  }
+
+  /**
+   * Use navigator.sendBeacon for last-chance delivery (browser only)
+   */
+  private sendBeaconFlush(): void {
+    if (typeof navigator === "undefined" || !navigator.sendBeacon) return;
+
+    const items = this.queue.drain();
+    if (items.length === 0) return;
+
+    for (const item of items) {
+      try {
+        const blob = new Blob([JSON.stringify(item.payload)], {
+          type: "application/json",
+        });
+
+        // sendBeacon doesn't support custom headers, so we embed auth in the payload
+        const enrichedPayload = {
+          ...item.payload,
+          _auth: {
+            apiKey: this.config.apiKey,
+            apiSecret: this.config.apiSecret,
+          },
+        };
+
+        navigator.sendBeacon(
+          this.config.endpoint,
+          new Blob([JSON.stringify(enrichedPayload)], {
+            type: "application/json",
+          }),
+        );
+      } catch {
+        // Best effort — nothing we can do here
+      }
     }
   }
 }

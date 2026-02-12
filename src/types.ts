@@ -1,50 +1,58 @@
-// ============================================================
-// LogVault SDK — Type Definitions
-// ============================================================
+// src/types.ts
 
-/** Log severity levels */
-export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL";
+// ============================================================================
+// ENUMS (mirrors Prisma schema)
+// ============================================================================
 
-/** Error classification types */
-export type ErrorType =
-  | "RUNTIME"
-  | "SYNTAX"
-  | "TYPE"
-  | "REFERENCE"
-  | "NETWORK"
-  | "VALIDATION"
-  | "DATABASE"
-  | "AUTHENTICATION"
-  | "AUTHORIZATION"
-  | "TIMEOUT"
-  | "MEMORY"
-  | "UNKNOWN";
+export enum LogLevel {
+  DEBUG = "DEBUG",
+  INFO = "INFO",
+  WARN = "WARN",
+  ERROR = "ERROR",
+  FATAL = "FATAL",
+}
 
-/** Error severity levels */
-export type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+export enum ErrorType {
+  RUNTIME = "RUNTIME",
+  SYNTAX = "SYNTAX",
+  NETWORK = "NETWORK",
+  DATABASE = "DATABASE",
+  AUTHENTICATION = "AUTHENTICATION",
+  AUTHORIZATION = "AUTHORIZATION",
+  VALIDATION = "VALIDATION",
+  TIMEOUT = "TIMEOUT",
+  MEMORY = "MEMORY",
+  UNKNOWN = "UNKNOWN",
+}
 
-/** Security event types */
-export type SecurityType =
-  | "AUTH_FAILURE"
-  | "BRUTE_FORCE"
-  | "XSS_ATTEMPT"
-  | "SQL_INJECTION"
-  | "CSRF_ATTEMPT"
-  | "RATE_LIMIT"
-  | "SUSPICIOUS_ACTIVITY"
-  | "DATA_BREACH"
-  | "UNAUTHORIZED_ACCESS"
-  | "PRIVILEGE_ESCALATION";
+export enum Severity {
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+  CRITICAL = "CRITICAL",
+}
 
-/** Generic metadata object */
-export type Metadata = Record<string, unknown>;
+export enum SecurityType {
+  BRUTE_FORCE = "BRUTE_FORCE",
+  UNAUTHORIZED_ACCESS = "UNAUTHORIZED_ACCESS",
+  SUSPICIOUS_ACTIVITY = "SUSPICIOUS_ACTIVITY",
+  DATA_BREACH = "DATA_BREACH",
+  INJECTION_ATTEMPT = "INJECTION_ATTEMPT",
+  XSS_ATTEMPT = "XSS_ATTEMPT",
+  CSRF_ATTEMPT = "CSRF_ATTEMPT",
+  RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
+  INVALID_TOKEN = "INVALID_TOKEN",
+  IP_BLACKLISTED = "IP_BLACKLISTED",
+}
 
-// ---- Payloads ----
+// ============================================================================
+// PAYLOAD TYPES
+// ============================================================================
 
 export interface LogPayload {
   level?: LogLevel;
   message: string;
-  metadata?: Metadata;
+  metadata?: Record<string, unknown>;
   source?: string;
   timestamp?: string;
 }
@@ -52,156 +60,211 @@ export interface LogPayload {
 export interface ErrorPayload {
   type?: ErrorType;
   message: string;
-  stack?: string | null; // ← dodaj | null
-  metadata?: Metadata | null; // ← dodaj | null
+  stack?: string;
+  metadata?: Record<string, unknown>;
   severity?: Severity;
   timestamp?: string;
 }
 
 export interface DebugPayload {
   type?: string;
-  data?: Metadata;
-  performance?: Metadata | null; // ← dodaj | null
+  data?: Record<string, unknown>;
+  performance?: Record<string, unknown>;
   timestamp?: string;
 }
 
 export interface SecurityPayload {
   type?: SecurityType;
   ipAddress?: string;
-  userAgent?: string | null; // ← dodaj | null
-  country?: string | null; // ← dodaj | null
-  description?: string;
-  metadata?: Metadata | null; // ← dodaj | null
+  userAgent?: string;
+  country?: string;
+  description: string;
+  metadata?: Record<string, unknown>;
 }
 
-// ---- Webhook ----
+// ============================================================================
+// WEBHOOK PAYLOAD
+// ============================================================================
 
 export interface WebhookPayload {
   type: "log" | "error" | "debug" | "security";
   data: LogPayload | ErrorPayload | DebugPayload | SecurityPayload;
+  _meta?: {
+    sdkVersion: string;
+    timestamp: string;
+    context?: ContextData;
+    batchId?: string;
+  };
 }
 
-export interface WebhookResponse {
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+export interface LunorConfig {
+  /** API Key from your Lunor project */
+  apiKey: string;
+
+  /** API Secret from your Lunor project */
+  apiSecret: string;
+
+  /** Webhook endpoint URL */
+  endpoint?: string;
+
+  /** Maximum items per batch flush */
+  batchSize?: number;
+
+  /** Interval (ms) between automatic flushes */
+  flushInterval?: number;
+
+  /** Maximum retry attempts per event */
+  maxRetries?: number;
+
+  /** Base delay (ms) for exponential backoff */
+  retryBaseDelay?: number;
+
+  /** Maximum delay (ms) for exponential backoff */
+  retryMaxDelay?: number;
+
+  /** Request timeout (ms) */
+  timeout?: number;
+
+  /** Enable automatic global error capturing */
+  captureGlobalErrors?: boolean;
+
+  /** Enable automatic unhandled rejection capturing */
+  captureUnhandledRejections?: boolean;
+
+  /** Enable console method interception */
+  captureConsole?: boolean;
+
+  /** Console levels to capture */
+  captureConsoleLevels?: ("error" | "warn" | "log" | "debug")[];
+
+  /** Enable offline queue persistence (browser: localStorage, node: file) */
+  enablePersistence?: boolean;
+
+  /** Storage key prefix for persistence */
+  persistencePrefix?: string;
+
+  /** Maximum items to keep in queue */
+  maxQueueSize?: number;
+
+  /** Minimum log level to send (events below this are dropped) */
+  minLogLevel?: LogLevel;
+
+  /** Enable debug mode (verbose SDK logging) */
+  debug?: boolean;
+
+  /** Default source tag for logs */
+  defaultSource?: string;
+
+  /** Extra context to attach to every event */
+  globalContext?: Record<string, unknown>;
+
+  /** Environment tag */
+  environment?: string;
+
+  /** Release/version tag */
+  release?: string;
+
+  /** Tags to attach to every event */
+  tags?: Record<string, string>;
+
+  /** Called before each event is queued — return false to drop */
+  beforeSend?: (
+    payload: WebhookPayload,
+  ) => WebhookPayload | false | Promise<WebhookPayload | false>;
+
+  /** Called after a successful flush */
+  onFlushSuccess?: (count: number) => void;
+
+  /** Called when a flush fails after all retries */
+  onFlushError?: (error: Error, failedItems: WebhookPayload[]) => void;
+
+  /** Called when the SDK is ready */
+  onReady?: () => void;
+
+  /** Sampling rate 0.0 - 1.0 (1.0 = send everything) */
+  sampleRate?: number;
+
+  /** Enable automatic performance tracking */
+  enablePerformance?: boolean;
+}
+
+// ============================================================================
+// CONTEXT
+// ============================================================================
+
+export interface ContextData {
+  environment?: string;
+  release?: string;
+  tags?: Record<string, string>;
+  runtime?: "browser" | "node" | "edge" | "unknown";
+  os?: string;
+  hostname?: string;
+  userAgent?: string;
+  url?: string;
+  locale?: string;
+  timezone?: string;
+  screenResolution?: string;
+  memoryUsage?: Record<string, number>;
+  nodeVersion?: string;
+  pid?: number;
+}
+
+// ============================================================================
+// MIDDLEWARE
+// ============================================================================
+
+export type MiddlewareFn = (
+  payload: WebhookPayload,
+  next: () => void,
+) => void | Promise<void>;
+
+// ============================================================================
+// TRANSPORT
+// ============================================================================
+
+export interface TransportResponse {
   success: boolean;
   id?: string;
   type?: string;
   error?: string;
+  status?: number;
 }
 
-// ---- SDK Configuration ----
+// ============================================================================
+// QUEUE ITEM
+// ============================================================================
 
-export interface LogVaultConfig {
-  /** Your LogVault API key */
-  apiKey: string;
-
-  /** Your LogVault API secret */
-  apiSecret: string;
-
-  /** LogVault webhook endpoint URL */
-  endpoint: string;
-
-  /** Enable automatic global error catching (default: false) */
-  captureGlobalErrors?: boolean;
-
-  /** Intercept console.log/warn/error (default: false) */
-  interceptConsole?: boolean;
-
-  /** Enable performance monitoring (default: false) */
-  enablePerformance?: boolean;
-
-  /** Minimum log level to send (default: 'DEBUG') */
-  minLevel?: LogLevel;
-
-  /** Enable batching — send logs in batches (default: false) */
-  enableBatching?: boolean;
-
-  /** Batch flush interval in ms (default: 5000) */
-  batchInterval?: number;
-
-  /** Max batch size before auto-flush (default: 50) */
-  batchSize?: number;
-
-  /** Max retry attempts for failed requests (default: 3) */
-  maxRetries?: number;
-
-  /** Retry delay in ms (default: 1000) */
-  retryDelay?: number;
-
-  /** Request timeout in ms (default: 10000) */
-  timeout?: number;
-
-  /** Enable offline queue — store events when offline (default: false) */
-  enableOfflineQueue?: boolean;
-
-  /** Max offline queue size (default: 500) */
-  maxOfflineQueueSize?: number;
-
-  /** Sanitize sensitive fields from metadata (default: true) */
-  sanitize?: boolean;
-
-  /** Fields to redact (default: common sensitive fields) */
-  sensitiveFields?: string[];
-
-  /** Global metadata attached to every event */
-  globalMetadata?: Metadata;
-
-  /** Application environment */
-  environment?: string;
-
-  /** Application version / release tag */
-  release?: string;
-
-  /** Default source tag */
-  defaultSource?: string;
-
-  /** Hook called before each event is sent — return false to drop */
-  beforeSend?: (
-    event: WebhookPayload,
-  ) => WebhookPayload | false | Promise<WebhookPayload | false>;
-
-  /** Hook called after successful send */
-  onSuccess?: (response: WebhookResponse) => void;
-
-  /** Hook called on send error */
-  onError?: (error: Error, event: WebhookPayload) => void;
-
-  /** Enable SDK debug mode (default: false) */
-  debug?: boolean;
-}
-
-// ---- Batch ----
-
-export interface BatchItem {
+export interface QueueItem {
+  id: string;
   payload: WebhookPayload;
-  resolve: (value: WebhookResponse) => void;
-  reject: (reason: Error) => void;
+  retries: number;
+  createdAt: number;
+  lastAttempt?: number;
 }
 
-// ---- Context ----
+// ============================================================================
+// PERFORMANCE
+// ============================================================================
 
-export interface LogContext {
-  userId?: string;
-  sessionId?: string;
-  requestId?: string;
-  traceId?: string;
-  tags?: string[];
-  extra?: Metadata;
-}
-
-// ---- Performance ----
-
-export interface PerformanceEntry {
+export interface PerformanceMark {
   name: string;
   startTime: number;
   endTime?: number;
   duration?: number;
-  metadata?: Metadata;
+  metadata?: Record<string, unknown>;
 }
 
-// ---- Internal ----
+// ============================================================================
+// SDK STATE
+// ============================================================================
 
-export interface QueuedEvent {
-  payload: WebhookPayload;
-  timestamp: number;
-  retries: number;
-}
+export type SDKState =
+  | "idle"
+  | "initializing"
+  | "ready"
+  | "flushing"
+  | "destroyed";

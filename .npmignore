@@ -1,8 +1,0 @@
-src/
-examples/
-tests/
-.github/
-tsconfig.json
-tsup.config.ts
-vitest.config.ts
-.env*

@@ -1,0 +1,5 @@
+node_modules/
+# NIE ignoruj dist/ — potrzebny przy instalacji z git
+# dist/
+*.log
+.env

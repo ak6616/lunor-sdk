@@ -1,57 +1,227 @@
-// src/utils/retry.ts
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+
+// src/types.ts
+var LogLevel = /* @__PURE__ */ ((LogLevel2) => {
+  LogLevel2["DEBUG"] = "DEBUG";
+  LogLevel2["INFO"] = "INFO";
+  LogLevel2["WARN"] = "WARN";
+  LogLevel2["ERROR"] = "ERROR";
+  LogLevel2["FATAL"] = "FATAL";
+  return LogLevel2;
+})(LogLevel || {});
+var ErrorType = /* @__PURE__ */ ((ErrorType2) => {
+  ErrorType2["RUNTIME"] = "RUNTIME";
+  ErrorType2["SYNTAX"] = "SYNTAX";
+  ErrorType2["NETWORK"] = "NETWORK";
+  ErrorType2["DATABASE"] = "DATABASE";
+  ErrorType2["AUTHENTICATION"] = "AUTHENTICATION";
+  ErrorType2["AUTHORIZATION"] = "AUTHORIZATION";
+  ErrorType2["VALIDATION"] = "VALIDATION";
+  ErrorType2["TIMEOUT"] = "TIMEOUT";
+  ErrorType2["MEMORY"] = "MEMORY";
+  ErrorType2["UNKNOWN"] = "UNKNOWN";
+  return ErrorType2;
+})(ErrorType || {});
+var Severity = /* @__PURE__ */ ((Severity2) => {
+  Severity2["LOW"] = "LOW";
+  Severity2["MEDIUM"] = "MEDIUM";
+  Severity2["HIGH"] = "HIGH";
+  Severity2["CRITICAL"] = "CRITICAL";
+  return Severity2;
+})(Severity || {});
+var SecurityType = /* @__PURE__ */ ((SecurityType2) => {
+  SecurityType2["BRUTE_FORCE"] = "BRUTE_FORCE";
+  SecurityType2["UNAUTHORIZED_ACCESS"] = "UNAUTHORIZED_ACCESS";
+  SecurityType2["SUSPICIOUS_ACTIVITY"] = "SUSPICIOUS_ACTIVITY";
+  SecurityType2["DATA_BREACH"] = "DATA_BREACH";
+  SecurityType2["INJECTION_ATTEMPT"] = "INJECTION_ATTEMPT";
+  SecurityType2["XSS_ATTEMPT"] = "XSS_ATTEMPT";
+  SecurityType2["CSRF_ATTEMPT"] = "CSRF_ATTEMPT";
+  SecurityType2["RATE_LIMIT_EXCEEDED"] = "RATE_LIMIT_EXCEEDED";
+  SecurityType2["INVALID_TOKEN"] = "INVALID_TOKEN";
+  SecurityType2["IP_BLACKLISTED"] = "IP_BLACKLISTED";
+  return SecurityType2;
+})(SecurityType || {});
+
+// src/constants.ts
+var SDK_VERSION = "2.0.0";
+var SDK_NAME = "lunor-sdk";
+var LUNOR_ENDPOINT = "https://www.lunor.com.pl/api/webhook";
+var DEFAULT_CONFIG = {
+  // Endpoint jest stały — zawsze Twój serwer
+  endpoint: LUNOR_ENDPOINT,
+  batchSize: 10,
+  flushInterval: 5e3,
+  maxRetries: 3,
+  retryBaseDelay: 1e3,
+  retryMaxDelay: 3e4,
+  timeout: 1e4,
+  captureGlobalErrors: true,
+  captureUnhandledRejections: true,
+  captureConsole: false,
+  captureConsoleLevels: ["error", "warn"],
+  enablePersistence: true,
+  persistencePrefix: "__lunor_",
+  maxQueueSize: 1e3,
+  minLogLevel: "DEBUG" /* DEBUG */,
+  debug: false,
+  defaultSource: "app",
+  environment: "production",
+  sampleRate: 1,
+  enablePerformance: false
+};
+var LOG_LEVEL_PRIORITY = {
+  ["DEBUG" /* DEBUG */]: 0,
+  ["INFO" /* INFO */]: 1,
+  ["WARN" /* WARN */]: 2,
+  ["ERROR" /* ERROR */]: 3,
+  ["FATAL" /* FATAL */]: 4
+};
+var HEADER_API_KEY = "X-API-Key";
+var HEADER_API_SECRET = "X-API-Secret";
+
+// src/utils.ts
+function generateId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+}
+function nowISO() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+function safeStringify(obj, maxDepth = 10) {
+  const seen = /* @__PURE__ */ new WeakSet();
+  let depth = 0;
+  return JSON.stringify(obj, (_key, value) => {
+    if (typeof value === "object" && value !== null) {
+      if (seen.has(value) || depth > maxDepth) return "[Circular]";
+      seen.add(value);
+      depth++;
+    }
+    if (typeof value === "bigint") return value.toString();
+    if (value instanceof Error) {
+      return {
+        name: value.name,
+        message: value.message,
+        stack: value.stack
+      };
+    }
+    return value;
+  });
+}
+function safeParse(json, fallback) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return fallback;
+  }
+}
+function createInternalLogger(debug) {
+  const prefix = `[${SDK_NAME}]`;
+  return {
+    debug: (...args) => {
+      if (debug) console.debug(prefix, ...args);
+    },
+    info: (...args) => {
+      if (debug) console.info(prefix, ...args);
+    },
+    warn: (...args) => {
+      console.warn(prefix, ...args);
+    },
+    error: (...args) => {
+      console.error(prefix, ...args);
+    }
+  };
+}
+function detectRuntime() {
+  if (typeof window !== "undefined" && typeof document !== "undefined")
+    return "browser";
+  if (typeof process !== "undefined" && process.versions?.node) return "node";
+  if (typeof globalThis !== "undefined" && typeof globalThis.EdgeRuntime === "string")
+    return "edge";
+  return "unknown";
+}
+function isBrowser() {
+  return detectRuntime() === "browser";
+}
+function isNode() {
+  return detectRuntime() === "node";
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function extractStack(error) {
+  return error.stack || `${error.name}: ${error.message}`;
+}
+function truncate(str, maxLength = 1e4) {
+  if (str.length <= maxLength) return str;
+  return str.substring(0, maxLength) + `... [truncated, total ${str.length} chars]`;
+}
+
+// src/retry.ts
 async function withRetry(fn, options) {
-  const { maxRetries, baseDelay, maxDelay = 3e4, onRetry } = options;
   let lastError = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
     try {
       return await fn();
-    } catch (error2) {
-      lastError = error2 instanceof Error ? error2 : new Error(String(error2));
-      if (attempt === maxRetries) break;
-      const delay = Math.min(
-        baseDelay * Math.pow(2, attempt) + Math.random() * 1e3,
-        maxDelay
-      );
-      onRetry?.(attempt + 1, lastError);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < options.maxRetries) {
+        const delay = calculateBackoff(
+          attempt,
+          options.baseDelay,
+          options.maxDelay
+        );
+        options.onRetry?.(attempt + 1, lastError);
+        await sleep(delay);
+      }
     }
   }
   throw lastError;
 }
+function calculateBackoff(attempt, baseDelay, maxDelay) {
+  const exponentialDelay = baseDelay * Math.pow(2, attempt);
+  const jitter = Math.random() * baseDelay;
+  return Math.min(exponentialDelay + jitter, maxDelay);
+}
 
-// src/transports/http.ts
-var HttpTransport = class {
-  constructor(config) {
-    this.config = {
-      apiKey: config.apiKey,
-      apiSecret: config.apiSecret,
-      endpoint: config.endpoint.replace(/\/$/, ""),
-      timeout: config.timeout ?? 1e4,
-      maxRetries: config.maxRetries ?? 3,
-      retryDelay: config.retryDelay ?? 1e3,
-      debug: config.debug ?? false
-    };
+// src/transport.ts
+var Transport = class {
+  constructor(config, logger) {
+    this.config = config;
+    this.logger = logger;
   }
+  /**
+   * Send a single payload to the webhook endpoint
+   */
   async send(payload) {
     return withRetry(() => this.doSend(payload), {
-      maxRetries: this.config.maxRetries,
-      baseDelay: this.config.retryDelay,
-      onRetry: (attempt, error2) => {
-        if (this.config.debug) {
-          console.warn(
-            `[LogVault] Retry ${attempt}/${this.config.maxRetries}: ${error2.message}`
-          );
-        }
+      maxRetries: this.config.maxRetries ?? 3,
+      baseDelay: this.config.retryBaseDelay ?? 1e3,
+      maxDelay: this.config.retryMaxDelay ?? 3e4,
+      onRetry: (attempt, error) => {
+        this.logger.warn(
+          `Retry attempt ${attempt} for ${payload.type}: ${error.message}`
+        );
       }
     });
   }
+  /**
+   * Send a batch of payloads
+   */
   async sendBatch(payloads) {
     const results = [];
-    const concurrency = 5;
-    for (let i = 0; i < payloads.length; i += concurrency) {
-      const chunk = payloads.slice(i, i + concurrency);
+    const concurrencyLimit = 5;
+    for (let i = 0; i < payloads.length; i += concurrencyLimit) {
+      const chunk = payloads.slice(i, i + concurrencyLimit);
       const chunkResults = await Promise.allSettled(
-        chunk.map((p) => this.send(p))
+        chunk.map((payload) => this.send(payload))
       );
       for (const result of chunkResults) {
         if (result.status === "fulfilled") {
@@ -59,7 +229,7 @@ var HttpTransport = class {
         } else {
           results.push({
             success: false,
-            error: result.reason?.message ?? "Unknown error"
+            error: result.reason?.message || "Unknown error"
           });
         }
       }
@@ -68,867 +238,930 @@ var HttpTransport = class {
   }
   async doSend(payload) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      this.config.timeout ?? 1e4
+    );
     try {
-      if (this.config.debug) {
-        console.debug(
-          `[LogVault] Sending ${payload.type}:`,
-          JSON.stringify(payload.data).slice(0, 200)
-        );
-      }
       const response = await fetch(this.config.endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-API-Key": this.config.apiKey,
-          "X-API-Secret": this.config.apiSecret,
-          "User-Agent": "LogVault-SDK/1.0.0"
+          [HEADER_API_KEY]: this.config.apiKey,
+          [HEADER_API_SECRET]: this.config.apiSecret
         },
         body: JSON.stringify(payload),
         signal: controller.signal
       });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          data.error || `HTTP ${response.status}: ${response.statusText}`
-        );
-      }
-      return data;
-    } catch (error2) {
-      if (error2 instanceof DOMException && error2.name === "AbortError") {
-        throw new Error(`Request timed out after ${this.config.timeout}ms`);
-      }
-      throw error2;
-    } finally {
       clearTimeout(timeoutId);
-    }
-  }
-};
-
-// src/transports/batch.ts
-var BatchTransport = class {
-  constructor(config, http) {
-    this.queue = [];
-    this.timer = null;
-    this.http = http;
-    this.batchSize = config.batchSize ?? 50;
-    this.batchInterval = config.batchInterval ?? 5e3;
-    this.debug = config.debug ?? false;
-    this.startTimer();
-  }
-  add(payload) {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ payload, resolve, reject });
-      if (this.queue.length >= this.batchSize) {
-        this.flush();
-      }
-    });
-  }
-  async flush() {
-    if (this.queue.length === 0) return;
-    const items = this.queue.splice(0, this.batchSize);
-    if (this.debug) {
-      console.debug(`[LogVault] Flushing batch of ${items.length} events`);
-    }
-    try {
-      const results = await this.http.sendBatch(items.map((i) => i.payload));
-      items.forEach((item, idx) => {
-        const result = results[idx];
-        if (result && result.success) {
-          item.resolve(result);
-        } else {
-          item.reject(new Error(result?.error || "Batch send failed"));
+      if (!response.ok) {
+        const body = await response.text().catch(() => "No body");
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          const error = new Error(`HTTP ${response.status}: ${body}`);
+          error.noRetry = true;
+          throw error;
         }
-      });
-    } catch (error2) {
-      const err = error2 instanceof Error ? error2 : new Error(String(error2));
-      items.forEach((item) => item.reject(err));
+        throw new Error(`HTTP ${response.status}: ${body}`);
+      }
+      const json = await response.json();
+      return {
+        success: true,
+        id: json.id,
+        type: json.type
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.noRetry) {
+        this.logger.error(`Non-retryable error: ${error.message}`);
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+      throw error;
     }
-  }
-  startTimer() {
-    this.timer = setInterval(() => {
-      this.flush();
-    }, this.batchInterval);
-    if (typeof this.timer === "object" && "unref" in this.timer) {
-      this.timer.unref();
-    }
-  }
-  destroy() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.flush();
-  }
-  get pending() {
-    return this.queue.length;
   }
 };
 
-// src/transports/offline-queue.ts
-var OfflineQueue = class {
-  constructor(config, http) {
-    this.http = http;
-    this.queue = [];
-    this.processing = false;
-    this.maxSize = config.maxOfflineQueueSize ?? 500;
-    this.debug = config.debug ?? false;
+// src/queue.ts
+var PersistentQueue = class {
+  constructor(maxSize, storageKey, enablePersistence, logger) {
+    this.items = [];
+    this.maxSize = maxSize;
+    this.storageKey = storageKey;
+    this.enablePersistence = enablePersistence;
+    this.logger = logger;
+    this.restore();
   }
+  /**
+   * Add an item to the queue
+   */
   enqueue(payload) {
-    if (this.queue.length >= this.maxSize) {
-      this.queue.shift();
-      if (this.debug) {
-        console.warn("[LogVault] Offline queue full \u2014 dropping oldest event");
-      }
+    if (this.items.length >= this.maxSize) {
+      const dropped = this.items.shift();
+      this.logger.warn(
+        `Queue full (${this.maxSize}), dropping oldest item: ${dropped?.id}`
+      );
     }
-    this.queue.push({
+    const item = {
+      id: generateId(),
       payload,
-      timestamp: Date.now(),
-      retries: 0
-    });
-    if (this.debug) {
-      console.debug(
-        `[LogVault] Queued offline event (${this.queue.length} in queue)`
-      );
-    }
+      retries: 0,
+      createdAt: Date.now()
+    };
+    this.items.push(item);
+    this.persist();
   }
-  async drain() {
-    if (this.processing || this.queue.length === 0) return;
-    this.processing = true;
-    if (this.debug) {
-      console.debug(
-        `[LogVault] Draining offline queue (${this.queue.length} events)`
-      );
-    }
-    while (this.queue.length > 0) {
-      const event = this.queue[0];
-      try {
-        await this.http.send(event.payload);
-        this.queue.shift();
-      } catch {
-        event.retries++;
-        if (event.retries >= 3) {
-          this.queue.shift();
-          if (this.debug) {
-            console.warn("[LogVault] Dropping event after max retries");
-          }
-        } else {
-          break;
-        }
-      }
-    }
-    this.processing = false;
+  /**
+   * Take up to `count` items from the front of the queue
+   */
+  dequeue(count) {
+    const taken = this.items.splice(0, count);
+    this.persist();
+    return taken;
   }
+  /**
+   * Return items to the front of the queue (for retry)
+   */
+  requeue(items) {
+    const updatedItems = items.map((item) => ({
+      ...item,
+      retries: item.retries + 1,
+      lastAttempt: Date.now()
+    }));
+    this.items.unshift(...updatedItems);
+    if (this.items.length > this.maxSize) {
+      this.items = this.items.slice(0, this.maxSize);
+    }
+    this.persist();
+  }
+  /**
+   * Get current queue size
+   */
   get size() {
-    return this.queue.length;
-  }
-};
-
-// src/context/context-manager.ts
-var ContextManager = class {
-  constructor() {
-    this.globalContext = {};
-    this.scopeStack = [];
-  }
-  setGlobalContext(ctx) {
-    this.globalContext = { ...this.globalContext, ...ctx };
-  }
-  clearGlobalContext() {
-    this.globalContext = {};
-  }
-  pushScope(ctx) {
-    this.scopeStack.push(ctx);
-  }
-  popScope() {
-    return this.scopeStack.pop();
-  }
-  getContext() {
-    const merged = { ...this.globalContext };
-    for (const scope of this.scopeStack) {
-      Object.assign(merged, scope);
-      if (scope.tags) {
-        merged.tags = [...merged.tags || [], ...scope.tags];
-      }
-      if (scope.extra) {
-        merged.extra = { ...merged.extra || {}, ...scope.extra };
-      }
-    }
-    return merged;
-  }
-  getContextAsMetadata() {
-    const ctx = this.getContext();
-    const meta = {};
-    if (ctx.userId) meta._userId = ctx.userId;
-    if (ctx.sessionId) meta._sessionId = ctx.sessionId;
-    if (ctx.requestId) meta._requestId = ctx.requestId;
-    if (ctx.traceId) meta._traceId = ctx.traceId;
-    if (ctx.tags && ctx.tags.length > 0) meta._tags = ctx.tags;
-    if (ctx.extra) Object.assign(meta, ctx.extra);
-    return meta;
-  }
-};
-
-// src/utils/sanitizer.ts
-var DEFAULT_SENSITIVE_FIELDS = [
-  "password",
-  "passwd",
-  "secret",
-  "token",
-  "accessToken",
-  "access_token",
-  "refreshToken",
-  "refresh_token",
-  "apiKey",
-  "api_key",
-  "apiSecret",
-  "api_secret",
-  "authorization",
-  "cookie",
-  "creditCard",
-  "credit_card",
-  "cardNumber",
-  "card_number",
-  "cvv",
-  "ssn",
-  "social_security",
-  "privateKey",
-  "private_key"
-];
-var Sanitizer = class {
-  constructor(customFields = []) {
-    this.sensitiveFields = /* @__PURE__ */ new Set([
-      ...DEFAULT_SENSITIVE_FIELDS.map((f) => f.toLowerCase()),
-      ...customFields.map((f) => f.toLowerCase())
-    ]);
-  }
-  sanitize(data, depth = 0) {
-    if (depth > 10) return "[MAX_DEPTH]";
-    if (data === null || data === void 0) return data;
-    if (typeof data === "string") return data;
-    if (typeof data === "number" || typeof data === "boolean") return data;
-    if (Array.isArray(data)) {
-      return data.map((item) => this.sanitize(item, depth + 1));
-    }
-    if (typeof data === "object") {
-      const sanitized = {};
-      for (const [key, value] of Object.entries(data)) {
-        if (this.sensitiveFields.has(key.toLowerCase())) {
-          sanitized[key] = "[REDACTED]";
-        } else {
-          sanitized[key] = this.sanitize(value, depth + 1);
-        }
-      }
-      return sanitized;
-    }
-    return String(data);
-  }
-  sanitizeMetadata(metadata) {
-    if (!metadata) return metadata;
-    return this.sanitize(metadata);
-  }
-};
-
-// src/interceptors/performance.ts
-var PerformanceMonitor = class {
-  constructor(client) {
-    this.client = client;
-    this.entries = /* @__PURE__ */ new Map();
-  }
-  startTimer(name, metadata) {
-    const entry = {
-      name,
-      startTime: Date.now(),
-      metadata
-    };
-    this.entries.set(name, entry);
-    return () => this.stopTimer(name);
-  }
-  stopTimer(name) {
-    const entry = this.entries.get(name);
-    if (!entry) return null;
-    entry.endTime = Date.now();
-    entry.duration = entry.endTime - entry.startTime;
-    this.entries.delete(name);
-    this.client.debug({
-      type: "performance",
-      data: {
-        name: entry.name,
-        duration: entry.duration,
-        ...entry.metadata
-      },
-      performance: {
-        startTime: entry.startTime,
-        endTime: entry.endTime,
-        durationMs: entry.duration
-      }
-    });
-    return entry;
+    return this.items.length;
   }
   /**
-   * Measure an async operation
+   * Check if queue is empty
    */
-  async measure(name, fn, metadata) {
-    const stop = this.startTimer(name, metadata);
+  get isEmpty() {
+    return this.items.length === 0;
+  }
+  /**
+   * Get all items (without removing)
+   */
+  peek() {
+    return [...this.items];
+  }
+  /**
+   * Clear the queue
+   */
+  clear() {
+    this.items = [];
+    this.persist();
+  }
+  /**
+   * Drain the entire queue
+   */
+  drain() {
+    const all = [...this.items];
+    this.items = [];
+    this.persist();
+    return all;
+  }
+  /**
+   * Persist queue to storage
+   */
+  persist() {
+    if (!this.enablePersistence) return;
     try {
-      return await fn();
-    } finally {
-      stop();
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(this.storageKey, safeStringify(this.items));
+      }
+    } catch (error) {
+      this.logger.debug("Failed to persist queue:", error);
     }
   }
   /**
-   * Wrap a function with automatic performance tracking
+   * Restore queue from storage
    */
-  wrap(name, fn) {
-    const self = this;
-    return function(...args) {
-      const stop = self.startTimer(name, { argCount: args.length });
-      try {
-        const result = fn.apply(this, args);
-        if (result instanceof Promise) {
-          return result.finally(() => stop());
+  restore() {
+    if (!this.enablePersistence) return;
+    try {
+      if (typeof localStorage !== "undefined") {
+        const stored = localStorage.getItem(this.storageKey);
+        if (stored) {
+          const parsed = safeParse(stored, []);
+          this.items = parsed.filter(
+            // Only restore items less than 24h old
+            (item) => Date.now() - item.createdAt < 24 * 60 * 60 * 1e3
+          );
+          if (this.items.length > 0) {
+            this.logger.info(
+              `Restored ${this.items.length} items from persistence`
+            );
+          }
         }
-        stop();
-        return result;
-      } catch (error2) {
-        stop();
-        throw error2;
       }
-    };
+    } catch (error) {
+      this.logger.debug("Failed to restore queue:", error);
+    }
   }
 };
 
-// src/interceptors/global-error.ts
-function setupGlobalErrorHandler(client) {
-  if (typeof process !== "undefined" && process.on) {
-    const uncaughtHandler = (error2) => {
-      client.captureException(error2, {
-        severity: "CRITICAL",
-        metadata: { handler: "uncaughtException" }
-      });
-    };
-    const rejectionHandler = (reason) => {
-      const error2 = reason instanceof Error ? reason : new Error(String(reason));
-      client.captureException(error2, {
-        severity: "HIGH",
-        metadata: { handler: "unhandledRejection" }
-      });
-    };
-    process.on("uncaughtException", uncaughtHandler);
-    process.on("unhandledRejection", rejectionHandler);
-    return () => {
-      process.removeListener("uncaughtException", uncaughtHandler);
-      process.removeListener("unhandledRejection", rejectionHandler);
-    };
+// src/middleware.ts
+var MiddlewareChain = class {
+  constructor() {
+    this.middlewares = [];
   }
-  if (typeof window !== "undefined") {
-    const errorHandler = (event) => {
-      client.captureException(event.error || new Error(event.message), {
-        severity: "HIGH",
+  /**
+   * Add a middleware function
+   */
+  use(fn) {
+    this.middlewares.push(fn);
+  }
+  /**
+   * Execute the middleware chain on a payload.
+   * Each middleware can modify the payload or stop the chain.
+   * Returns the (possibly modified) payload, or null if dropped.
+   */
+  async execute(payload) {
+    let currentPayload = payload;
+    let dropped = false;
+    for (const middleware of this.middlewares) {
+      if (dropped) break;
+      let nextCalled = false;
+      await middleware(currentPayload, () => {
+        nextCalled = true;
+      });
+      if (!nextCalled) {
+        dropped = true;
+      }
+    }
+    return dropped ? null : currentPayload;
+  }
+  /**
+   * Get the number of registered middlewares
+   */
+  get count() {
+    return this.middlewares.length;
+  }
+  /**
+   * Clear all middlewares
+   */
+  clear() {
+    this.middlewares = [];
+  }
+};
+
+// src/context.ts
+function collectContext(config) {
+  const runtime = detectRuntime();
+  const context = {
+    environment: config.environment,
+    release: config.release,
+    tags: config.tags,
+    runtime
+  };
+  if (isBrowser()) {
+    collectBrowserContext(context);
+  }
+  if (isNode()) {
+    collectNodeContext(context);
+  }
+  return context;
+}
+function collectBrowserContext(context) {
+  try {
+    context.userAgent = navigator.userAgent;
+    context.url = window.location.href;
+    context.locale = navigator.language;
+    context.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (window.screen) {
+      context.screenResolution = `${window.screen.width}x${window.screen.height}`;
+    }
+    context.os = extractOSFromUA(navigator.userAgent);
+  } catch {
+  }
+}
+function collectNodeContext(context) {
+  try {
+    const os = __require("os");
+    context.hostname = os.hostname();
+    context.os = `${os.platform()} ${os.release()}`;
+    context.nodeVersion = process.version;
+    context.pid = process.pid;
+    const mem = process.memoryUsage();
+    context.memoryUsage = {
+      rss: Math.round(mem.rss / 1024 / 1024),
+      heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+      heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+      external: Math.round(mem.external / 1024 / 1024)
+    };
+  } catch {
+  }
+}
+function extractOSFromUA(ua) {
+  if (ua.includes("Windows")) return "Windows";
+  if (ua.includes("Mac OS")) return "macOS";
+  if (ua.includes("Linux")) return "Linux";
+  if (ua.includes("Android")) return "Android";
+  if (ua.includes("iOS") || ua.includes("iPhone") || ua.includes("iPad"))
+    return "iOS";
+  return "Unknown";
+}
+
+// src/global-handlers.ts
+function installGlobalHandlers(client, options) {
+  const cleanups = [];
+  if (options.captureErrors) {
+    cleanups.push(installErrorHandler(client));
+  }
+  if (options.captureRejections) {
+    cleanups.push(installRejectionHandler(client));
+  }
+  if (options.captureConsole) {
+    cleanups.push(installConsoleCapture(client, options.consoleLevels));
+  }
+  return {
+    uninstall: () => {
+      cleanups.forEach((cleanup) => cleanup());
+    }
+  };
+}
+function installErrorHandler(client) {
+  if (isBrowser()) {
+    const handler = (event) => {
+      client.captureError({
+        type: "RUNTIME" /* RUNTIME */,
+        message: event.message || "Uncaught error",
+        stack: event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`,
+        severity: "HIGH" /* HIGH */,
         metadata: {
-          handler: "window.onerror",
           filename: event.filename,
           lineno: event.lineno,
-          colno: event.colno
+          colno: event.colno,
+          autoCapture: true
         }
       });
     };
-    const rejectionHandler = (event) => {
-      const error2 = event.reason instanceof Error ? event.reason : new Error(String(event.reason));
-      client.captureException(error2, {
-        severity: "HIGH",
-        metadata: { handler: "unhandledrejection" }
+    window.addEventListener("error", handler);
+    return () => window.removeEventListener("error", handler);
+  }
+  if (isNode()) {
+    const handler = (error) => {
+      client.captureError({
+        type: "RUNTIME" /* RUNTIME */,
+        message: error.message || "Uncaught exception",
+        stack: error.stack,
+        severity: "CRITICAL" /* CRITICAL */,
+        metadata: {
+          name: error.name,
+          autoCapture: true
+        }
+      });
+      client.forceFlush().finally(() => {
+        process.exit(1);
       });
     };
-    window.addEventListener("error", errorHandler);
-    window.addEventListener("unhandledrejection", rejectionHandler);
-    return () => {
-      window.removeEventListener("error", errorHandler);
-      window.removeEventListener("unhandledrejection", rejectionHandler);
-    };
+    process.on("uncaughtException", handler);
+    return () => process.removeListener("uncaughtException", handler);
   }
   return () => {
   };
 }
-
-// src/interceptors/console.ts
-var CONSOLE_LEVEL_MAP = {
-  debug: "DEBUG",
-  log: "INFO",
-  info: "INFO",
-  warn: "WARN",
-  error: "ERROR"
-};
-function setupConsoleInterceptor(client) {
-  const original = {
-    debug: console.debug,
-    log: console.log,
-    info: console.info,
-    warn: console.warn,
-    error: console.error
-  };
-  for (const [method, level] of Object.entries(CONSOLE_LEVEL_MAP)) {
-    const originalFn = original[method];
-    console[method] = (...args) => {
-      originalFn.apply(console, args);
-      const message = args.map((arg) => {
-        if (typeof arg === "string") return arg;
-        try {
-          return JSON.stringify(arg);
-        } catch {
-          return String(arg);
-        }
-      }).join(" ");
-      client.log(message, {
-        level,
-        source: "console",
-        metadata: { method, argCount: args.length }
+function installRejectionHandler(client) {
+  if (isBrowser()) {
+    const handler = (event) => {
+      const reason = event.reason;
+      const message = reason instanceof Error ? reason.message : String(reason ?? "Unhandled rejection");
+      const stack = reason instanceof Error ? reason.stack : void 0;
+      client.captureError({
+        type: "RUNTIME" /* RUNTIME */,
+        message: `Unhandled Promise Rejection: ${message}`,
+        stack,
+        severity: "HIGH" /* HIGH */,
+        metadata: { autoCapture: true, type: "unhandledRejection" }
       });
     };
+    window.addEventListener("unhandledrejection", handler);
+    return () => window.removeEventListener("unhandledrejection", handler);
+  }
+  if (isNode()) {
+    const handler = (reason) => {
+      const message = reason instanceof Error ? reason.message : String(reason ?? "Unhandled rejection");
+      const stack = reason instanceof Error ? reason.stack : void 0;
+      client.captureError({
+        type: "RUNTIME" /* RUNTIME */,
+        message: `Unhandled Promise Rejection: ${message}`,
+        stack,
+        severity: "HIGH" /* HIGH */,
+        metadata: { autoCapture: true, type: "unhandledRejection" }
+      });
+    };
+    process.on("unhandledRejection", handler);
+    return () => process.removeListener("unhandledRejection", handler);
   }
   return () => {
-    Object.assign(console, original);
   };
 }
-
-// src/utils/fingerprint.ts
-function generateErrorFingerprint(message, stack, type) {
-  const parts = [];
-  if (type) parts.push(type);
-  const cleanMessage = message.replace(/\b\d+\b/g, "<N>").replace(/['"][^'"]*['"]/g, "<S>").replace(/0x[0-9a-fA-F]+/g, "<HEX>").trim();
-  parts.push(cleanMessage);
-  if (stack) {
-    const lines = stack.split("\n");
-    const firstFrame = lines.find(
-      (line) => line.includes("at ") && !line.includes("node_modules") && !line.includes("<anonymous>")
-    );
-    if (firstFrame) {
-      const match = firstFrame.match(/at\s+(.+?)\s+\((.+?):(\d+):\d+\)/);
-      if (match) {
-        parts.push(`${match[1]}@${match[2]}:${match[3]}`);
-      }
+function installConsoleCapture(client, levels) {
+  const originalMethods = {};
+  const levelMap = {
+    error: "ERROR" /* ERROR */,
+    warn: "WARN" /* WARN */,
+    log: "INFO" /* INFO */,
+    debug: "DEBUG" /* DEBUG */
+  };
+  for (const level of levels) {
+    if (level in console) {
+      const original = console[level];
+      originalMethods[level] = original;
+      console[level] = (...args) => {
+        original.apply(console, args);
+        const message = args.map(
+          (arg) => typeof arg === "object" ? JSON.stringify(arg) : String(arg)
+        ).join(" ");
+        client.log({
+          level: levelMap[level] || "INFO" /* INFO */,
+          message,
+          metadata: { autoCapture: true, consoleLevel: level }
+        });
+      };
     }
   }
-  return simpleHash(parts.join("|"));
-}
-function simpleHash(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  return Math.abs(hash).toString(36);
+  return () => {
+    for (const [level, original] of Object.entries(originalMethods)) {
+      console[level] = original;
+    }
+  };
 }
 
 // src/client.ts
-var LOG_LEVEL_PRIORITY = {
-  DEBUG: 0,
-  INFO: 1,
-  WARN: 2,
-  ERROR: 3,
-  FATAL: 4
-};
-var LogVaultClient = class {
+var LunorClient = class {
   constructor(config) {
-    this.batch = null;
-    this.offlineQueue = null;
-    this.cleanupFns = [];
-    this._isOnline = true;
-    this._initialized = false;
-    this.validateConfig(config);
+    this.flushTimer = null;
+    this.globalHandlersCleanup = null;
+    this.performanceMarks = /* @__PURE__ */ new Map();
+    this._state = "idle";
+    this._eventCount = 0;
+    this._flushCount = 0;
+    this._errorCount = 0;
+    if (!config.apiKey || !config.apiSecret) {
+      throw new Error("[Lunor] apiKey and apiSecret are required");
+    }
     this.config = {
-      minLevel: "DEBUG",
-      sanitize: true,
-      enableBatching: false,
-      batchInterval: 5e3,
-      batchSize: 50,
-      maxRetries: 3,
-      retryDelay: 1e3,
-      timeout: 1e4,
-      enableOfflineQueue: false,
-      maxOfflineQueueSize: 500,
-      debug: false,
+      ...DEFAULT_CONFIG,
       ...config
     };
-    this.http = new HttpTransport(this.config);
-    this.contextManager = new ContextManager();
-    this.sanitizer = new Sanitizer(this.config.sensitiveFields);
-    this._performance = new PerformanceMonitor(this);
-    if (this.config.enableBatching) {
-      this.batch = new BatchTransport(this.config, this.http);
+    if (config.endpoint && config.endpoint !== LUNOR_ENDPOINT && this.config.environment === "production") {
+      console.warn(
+        "[Lunor] Custom endpoint is not allowed in production. Using default."
+      );
+      this.config.endpoint = LUNOR_ENDPOINT;
     }
-    if (this.config.enableOfflineQueue) {
-      this.offlineQueue = new OfflineQueue(this.config, this.http);
-      this.setupConnectivityListeners();
-    }
-    if (this.config.captureGlobalErrors) {
-      const cleanup = setupGlobalErrorHandler(this);
-      this.cleanupFns.push(cleanup);
-    }
-    if (this.config.interceptConsole) {
-      const cleanup = setupConsoleInterceptor(this);
-      this.cleanupFns.push(cleanup);
-    }
-    if (this.config.environment || this.config.release) {
-      this.contextManager.setGlobalContext({
-        extra: {
-          ...this.config.environment && {
-            environment: this.config.environment
-          },
-          ...this.config.release && { release: this.config.release }
-        }
-      });
-    }
-    this._initialized = true;
-    if (this.config.debug) {
-      console.debug("[LogVault] SDK initialized", {
-        endpoint: this.config.endpoint,
-        batching: this.config.enableBatching,
-        offlineQueue: this.config.enableOfflineQueue
-      });
-    }
+    this.logger = createInternalLogger(this.config.debug);
+    this.transport = new Transport(this.config, this.logger);
+    this.middlewareChain = new MiddlewareChain();
+    this.queue = new PersistentQueue(
+      this.config.maxQueueSize,
+      `${this.config.persistencePrefix}queue`,
+      this.config.enablePersistence,
+      this.logger
+    );
+    this._state = "initializing";
+    this.logger.info(`Lunor SDK v${SDK_VERSION} initializing...`);
+    this.globalHandlersCleanup = installGlobalHandlers(this, {
+      captureErrors: this.config.captureGlobalErrors,
+      captureRejections: this.config.captureUnhandledRejections,
+      captureConsole: this.config.captureConsole,
+      consoleLevels: this.config.captureConsoleLevels
+    });
+    this.startFlushTimer();
+    this.installShutdownHandler();
+    this._state = "ready";
+    this.logger.info("Lunor SDK ready");
+    this.config.onReady?.();
   }
-  // ============================================================
-  // Public API — Logging
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Logging
+  // ==========================================================================
   /**
-   * Send a log entry
+   * Send a log event
    */
-  async log(message, options = {}) {
-    const level = options.level || "INFO";
-    if (!this.shouldLog(level)) return null;
-    const payload = {
+  log(data) {
+    const payload = typeof data === "string" ? { level: "INFO" /* INFO */, message: data } : data;
+    if (!this.shouldSendLogLevel(payload.level || "INFO" /* INFO */)) return;
+    this.enqueue({
       type: "log",
       data: {
-        level,
-        message,
-        metadata: this.enrichMetadata(options.metadata),
-        source: options.source || this.config.defaultSource,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        ...payload,
+        level: payload.level || "INFO" /* INFO */,
+        source: payload.source || this.config.defaultSource,
+        timestamp: payload.timestamp || nowISO()
       }
-    };
-    return this.send(payload);
+    });
   }
-  /** Convenience: DEBUG level */
-  async trace(message, metadata) {
-    return this.log(message, { level: "DEBUG", metadata });
+  /** Shortcut: DEBUG level log */
+  debug(message, metadata) {
+    this.log({ level: "DEBUG" /* DEBUG */, message, metadata });
   }
-  /** Convenience: INFO level */
-  async info(message, metadata) {
-    return this.log(message, { level: "INFO", metadata });
+  /** Shortcut: INFO level log */
+  info(message, metadata) {
+    this.log({ level: "INFO" /* INFO */, message, metadata });
   }
-  /** Convenience: WARN level */
-  async warn(message, metadata) {
-    return this.log(message, { level: "WARN", metadata });
+  /** Shortcut: WARN level log */
+  warn(message, metadata) {
+    this.log({ level: "WARN" /* WARN */, message, metadata });
   }
-  /** Convenience: ERROR level */
-  async error(message, metadata) {
-    return this.log(message, { level: "ERROR", metadata });
+  /** Shortcut: ERROR level log (as log, not error event) */
+  errorLog(message, metadata) {
+    this.log({ level: "ERROR" /* ERROR */, message, metadata });
   }
-  /** Convenience: FATAL level */
-  async fatal(message, metadata) {
-    return this.log(message, { level: "FATAL", metadata });
+  /** Shortcut: FATAL level log — immediately flushes */
+  fatal(message, metadata) {
+    this.log({ level: "FATAL" /* FATAL */, message, metadata });
+    this.flush();
   }
-  // ============================================================
-  // Public API — Error Tracking
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Errors
+  // ==========================================================================
   /**
-   * Capture and report an error/exception
+   * Capture an error event
    */
-  async captureException(error2, options = {}) {
-    const err = typeof error2 === "string" ? new Error(error2) : error2;
-    const errorType = options.type || this.classifyError(err);
-    const severity = options.severity || "MEDIUM";
-    const fingerprint = generateErrorFingerprint(
-      err.message,
-      err.stack,
-      errorType
-    );
-    const payload = {
-      type: "error",
-      data: {
-        type: errorType,
-        message: err.message,
-        stack: err.stack || null,
-        severity,
-        metadata: this.enrichMetadata({
-          ...options.metadata,
-          _fingerprint: fingerprint,
-          _errorName: err.name
-        }),
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  captureError(data) {
+    let payload;
+    if (typeof data === "string") {
+      payload = { message: data, severity: "MEDIUM" /* MEDIUM */ };
+    } else if (data instanceof Error) {
+      payload = {
+        type: "RUNTIME" /* RUNTIME */,
+        message: data.message,
+        stack: extractStack(data),
+        severity: "MEDIUM" /* MEDIUM */,
+        metadata: { name: data.name }
+      };
+    } else {
+      payload = data;
+    }
+    const finalPayload = {
+      ...payload,
+      type: payload.type || "UNKNOWN" /* UNKNOWN */,
+      severity: payload.severity || "MEDIUM" /* MEDIUM */,
+      message: truncate(payload.message),
+      stack: payload.stack ? truncate(payload.stack) : void 0,
+      timestamp: payload.timestamp || nowISO()
+    };
+    this.enqueue({ type: "error", data: finalPayload });
+    if (finalPayload.severity === "CRITICAL" /* CRITICAL */) {
+      this.flush();
+    }
+  }
+  /**
+   * Shortcut: capture an Error object
+   */
+  captureException(error, extra) {
+    this.captureError({
+      type: "RUNTIME" /* RUNTIME */,
+      message: error.message,
+      stack: extractStack(error),
+      severity: extra?.severity || "MEDIUM" /* MEDIUM */,
+      metadata: {
+        name: error.name,
+        ...extra?.metadata
       }
-    };
-    return this.send(payload);
+    });
   }
+  // ==========================================================================
+  // PUBLIC API — Debug
+  // ==========================================================================
   /**
-   * Wrap an async function with automatic error capturing
+   * Send a debug/diagnostic event
    */
-  wrapAsync(fn, options) {
-    const self = this;
-    return async function(...args) {
-      try {
-        return await fn.apply(this, args);
-      } catch (error2) {
-        await self.captureException(
-          error2 instanceof Error ? error2 : new Error(String(error2)),
-          options
-        );
-        throw error2;
-      }
-    };
-  }
-  // ============================================================
-  // Public API — Debug
-  // ============================================================
-  /**
-   * Send debug/diagnostic data
-   */
-  async debug(options) {
-    const payload = {
+  captureDebug(data) {
+    this.enqueue({
       type: "debug",
       data: {
-        type: options.type || "debug",
-        data: this.enrichMetadata(options.data),
-        performance: options.performance,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        ...data,
+        type: data.type || "unknown",
+        timestamp: data.timestamp || nowISO()
       }
-    };
-    return this.send(payload);
+    });
   }
-  // ============================================================
-  // Public API — Security
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Security
+  // ==========================================================================
   /**
    * Report a security event
    */
-  async security(options) {
-    const payload = {
+  captureSecurityEvent(data) {
+    this.enqueue({
       type: "security",
       data: {
-        type: options.type || "SUSPICIOUS_ACTIVITY",
-        description: options.description,
-        ipAddress: options.ipAddress,
-        userAgent: options.userAgent,
-        country: options.country,
-        metadata: this.enrichMetadata(options.metadata)
+        ...data,
+        type: data.type || "SUSPICIOUS_ACTIVITY" /* SUSPICIOUS_ACTIVITY */
       }
-    };
-    return this.send(payload);
+    });
+    this.flush();
   }
-  // ============================================================
-  // Public API — Context
-  // ============================================================
+  // ==========================================================================
+  // PUBLIC API — Performance
+  // ==========================================================================
   /**
-   * Set global context (attached to every event)
+   * Start a performance measurement
    */
-  setContext(ctx) {
-    this.contextManager.setGlobalContext(ctx);
-  }
-  /**
-   * Set user info
-   */
-  setUser(userId, extra) {
-    this.contextManager.setGlobalContext({
-      userId,
-      extra
+  startTimer(name, metadata) {
+    this.performanceMarks.set(name, {
+      name,
+      startTime: performance.now(),
+      metadata
     });
   }
   /**
-   * Start a scoped context (e.g., for a request)
+   * Stop a performance measurement and optionally send as debug event
    */
-  pushScope(ctx) {
-    this.contextManager.pushScope(ctx);
-  }
-  /**
-   * End the current scope
-   */
-  popScope() {
-    this.contextManager.popScope();
-  }
-  /**
-   * Execute a function within a scoped context
-   */
-  async withScope(ctx, fn) {
-    this.pushScope(ctx);
-    try {
-      return await fn();
-    } finally {
-      this.popScope();
-    }
-  }
-  // ============================================================
-  // Public API — Performance
-  // ============================================================
-  get performance() {
-    return this._performance;
-  }
-  // ============================================================
-  // Public API — Lifecycle
-  // ============================================================
-  /**
-   * Flush all pending events
-   */
-  async flush() {
-    if (this.batch) {
-      await this.batch.flush();
-    }
-    if (this.offlineQueue && this._isOnline) {
-      await this.offlineQueue.drain();
-    }
-  }
-  /**
-   * Destroy the client — flush and clean up
-   */
-  async destroy() {
-    if (this.config.debug) {
-      console.debug("[LogVault] Destroying client...");
-    }
-    await this.flush();
-    if (this.batch) {
-      this.batch.destroy();
-    }
-    for (const cleanup of this.cleanupFns) {
-      cleanup();
-    }
-    this._initialized = false;
-  }
-  // ============================================================
-  // Internal
-  // ============================================================
-  validateConfig(config) {
-    if (!config.apiKey) throw new Error("[LogVault] apiKey is required");
-    if (!config.apiSecret) throw new Error("[LogVault] apiSecret is required");
-    if (!config.endpoint) throw new Error("[LogVault] endpoint is required");
-  }
-  shouldLog(level) {
-    const minPriority = LOG_LEVEL_PRIORITY[this.config.minLevel || "DEBUG"];
-    const currentPriority = LOG_LEVEL_PRIORITY[level];
-    return currentPriority >= minPriority;
-  }
-  enrichMetadata(metadata) {
-    const contextMeta = this.contextManager.getContextAsMetadata();
-    const globalMeta = this.config.globalMetadata || {};
-    const merged = {
-      ...globalMeta,
-      ...contextMeta,
-      ...metadata
-    };
-    if (this.config.sanitize) {
-      return this.sanitizer.sanitizeMetadata(merged) || merged;
-    }
-    return merged;
-  }
-  classifyError(error2) {
-    const name = error2.name?.toLowerCase() || "";
-    const message = error2.message?.toLowerCase() || "";
-    if (name.includes("type") || message.includes("is not a function"))
-      return "TYPE";
-    if (name.includes("reference") || message.includes("is not defined"))
-      return "REFERENCE";
-    if (name.includes("syntax")) return "SYNTAX";
-    if (name.includes("range")) return "RUNTIME";
-    if (message.includes("timeout") || message.includes("timed out"))
-      return "TIMEOUT";
-    if (message.includes("network") || message.includes("fetch") || message.includes("econnrefused"))
-      return "NETWORK";
-    if (message.includes("unauthorized") || message.includes("401"))
-      return "AUTHENTICATION";
-    if (message.includes("forbidden") || message.includes("403"))
-      return "AUTHORIZATION";
-    if (message.includes("validation") || message.includes("invalid"))
-      return "VALIDATION";
-    if (message.includes("database") || message.includes("prisma") || message.includes("sql"))
-      return "DATABASE";
-    if (message.includes("memory") || message.includes("heap")) return "MEMORY";
-    return "UNKNOWN";
-  }
-  async send(payload) {
-    if (!this._initialized) return null;
-    if (this.config.beforeSend) {
-      const result = await this.config.beforeSend(payload);
-      if (result === false) {
-        if (this.config.debug) {
-          console.debug("[LogVault] Event dropped by beforeSend hook");
-        }
-        return null;
-      }
-      payload = result;
-    }
-    try {
-      let response;
-      if (!this._isOnline && this.offlineQueue) {
-        this.offlineQueue.enqueue(payload);
-        return { success: true, id: "queued" };
-      }
-      if (this.batch) {
-        response = await this.batch.add(payload);
-      } else {
-        response = await this.http.send(payload);
-      }
-      this.config.onSuccess?.(response);
-      return response;
-    } catch (err) {
-      const error2 = err instanceof Error ? err : new Error(String(err));
-      if (this.offlineQueue) {
-        this.offlineQueue.enqueue(payload);
-      }
-      this.config.onError?.(error2, payload);
-      if (this.config.debug) {
-        console.error("[LogVault] Send failed:", error2.message);
-      }
+  stopTimer(name, sendAsDebug = true) {
+    const mark = this.performanceMarks.get(name);
+    if (!mark) {
+      this.logger.warn(`Performance mark "${name}" not found`);
       return null;
     }
+    mark.endTime = performance.now();
+    mark.duration = mark.endTime - mark.startTime;
+    this.performanceMarks.delete(name);
+    if (sendAsDebug) {
+      this.captureDebug({
+        type: "performance",
+        data: { name: mark.name, ...mark.metadata },
+        performance: {
+          duration: Math.round(mark.duration * 100) / 100,
+          startTime: mark.startTime,
+          endTime: mark.endTime
+        }
+      });
+    }
+    return mark;
   }
-  setupConnectivityListeners() {
+  /**
+   * Measure an async function's execution time
+   */
+  async measure(name, fn, metadata) {
+    this.startTimer(name, metadata);
+    try {
+      const result = await fn();
+      this.stopTimer(name);
+      return result;
+    } catch (error) {
+      const mark = this.stopTimer(name, false);
+      this.captureError({
+        type: "RUNTIME" /* RUNTIME */,
+        message: `Performance measurement "${name}" failed: ${error.message}`,
+        stack: error.stack,
+        severity: "MEDIUM" /* MEDIUM */,
+        metadata: {
+          ...metadata,
+          duration: mark?.duration
+        }
+      });
+      throw error;
+    }
+  }
+  // ==========================================================================
+  // PUBLIC API — Middleware
+  // ==========================================================================
+  /**
+   * Add a middleware that processes events before they're queued
+   */
+  use(middleware) {
+    this.middlewareChain.use(middleware);
+    return this;
+  }
+  // ==========================================================================
+  // PUBLIC API — Context
+  // ==========================================================================
+  /**
+   * Update global context (merged with existing)
+   */
+  setContext(context) {
+    this.config.globalContext = {
+      ...this.config.globalContext || {},
+      ...context
+    };
+  }
+  /**
+   * Set a tag
+   */
+  setTag(key, value) {
+    if (!this.config.tags) this.config.tags = {};
+    this.config.tags[key] = value;
+  }
+  /**
+   * Set the user context
+   */
+  setUser(user) {
+    this.setContext({ user });
+  }
+  // ==========================================================================
+  // PUBLIC API — Flush & Lifecycle
+  // ==========================================================================
+  /**
+   * Force an immediate flush of the queue
+   */
+  async forceFlush() {
+    await this.flush();
+  }
+  /**
+   * Get SDK stats
+   */
+  getStats() {
+    return {
+      state: this._state,
+      queueSize: this.queue.size,
+      totalEvents: this._eventCount,
+      totalFlushes: this._flushCount,
+      totalErrors: this._errorCount,
+      sdkVersion: SDK_VERSION
+    };
+  }
+  /**
+   * Destroy the SDK instance — flushes remaining events and cleans up
+   */
+  async destroy() {
+    this.logger.info("Destroying Lunor SDK...");
+    this._state = "destroyed";
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.globalHandlersCleanup?.uninstall();
+    await this.flush();
+    this.logger.info("Lunor SDK destroyed");
+  }
+  // ==========================================================================
+  // INTERNAL METHODS
+  // ==========================================================================
+  shouldSendLogLevel(level) {
+    const minPriority = LOG_LEVEL_PRIORITY[this.config.minLogLevel] ?? 0;
+    const currentPriority = LOG_LEVEL_PRIORITY[level] ?? 0;
+    return currentPriority >= minPriority;
+  }
+  shouldSample() {
+    if (this.config.sampleRate >= 1) return true;
+    if (this.config.sampleRate <= 0) return false;
+    return Math.random() < this.config.sampleRate;
+  }
+  async enqueue(payload) {
+    if (this._state === "destroyed") {
+      this.logger.warn("SDK destroyed, dropping event");
+      return;
+    }
+    if (!this.shouldSample()) {
+      this.logger.debug("Event dropped by sampling");
+      return;
+    }
+    payload._meta = {
+      sdkVersion: SDK_VERSION,
+      timestamp: nowISO(),
+      context: {
+        ...collectContext(this.config),
+        ...this.config.globalContext ? {
+          tags: {
+            ...this.config.tags || {},
+            ...this.config.globalContext
+          }
+        } : {}
+      }
+    };
+    if (this.config.beforeSend) {
+      try {
+        const result = await this.config.beforeSend(payload);
+        if (result === false) {
+          this.logger.debug("Event dropped by beforeSend hook");
+          return;
+        }
+        payload = result;
+      } catch (error) {
+        this.logger.error("beforeSend hook error:", error);
+      }
+    }
+    if (this.middlewareChain.count > 0) {
+      const processed = await this.middlewareChain.execute(payload);
+      if (!processed) {
+        this.logger.debug("Event dropped by middleware");
+        return;
+      }
+      payload = processed;
+    }
+    this.queue.enqueue(payload);
+    this._eventCount++;
+    this.logger.debug(
+      `Queued ${payload.type} event (queue: ${this.queue.size})`
+    );
+    if (this.queue.size >= this.config.batchSize) {
+      this.flush();
+    }
+  }
+  async flush() {
+    if (this.queue.isEmpty) return;
+    if (this._state === "flushing") return;
+    const previousState = this._state;
+    this._state = "flushing";
+    const items = this.queue.dequeue(this.config.batchSize);
+    const payloads = items.map((item) => item.payload);
+    this.logger.debug(`Flushing ${payloads.length} events...`);
+    try {
+      const results = await this.transport.sendBatch(payloads);
+      const failedItems = items.filter((_, index) => !results[index]?.success);
+      if (failedItems.length > 0) {
+        const retriable = failedItems.filter(
+          (item) => item.retries < this.config.maxRetries
+        );
+        const dropped = failedItems.filter(
+          (item) => item.retries >= this.config.maxRetries
+        );
+        if (retriable.length > 0) {
+          this.queue.requeue(retriable);
+          this.logger.warn(`${retriable.length} events requeued for retry`);
+        }
+        if (dropped.length > 0) {
+          this._errorCount += dropped.length;
+          this.logger.error(
+            `${dropped.length} events permanently dropped after max retries`
+          );
+          this.config.onFlushError?.(
+            new Error(`${dropped.length} events failed`),
+            dropped.map((i) => i.payload)
+          );
+        }
+      }
+      const successCount = payloads.length - failedItems.length;
+      if (successCount > 0) {
+        this._flushCount++;
+        this.config.onFlushSuccess?.(successCount);
+        this.logger.debug(`Successfully flushed ${successCount} events`);
+      }
+    } catch (error) {
+      this.queue.requeue(items);
+      this._errorCount++;
+      this.logger.error("Flush failed catastrophically:", error);
+      this.config.onFlushError?.(
+        error instanceof Error ? error : new Error(String(error)),
+        payloads
+      );
+    } finally {
+      this._state = previousState === "destroyed" ? "destroyed" : "ready";
+    }
+  }
+  startFlushTimer() {
+    this.flushTimer = setInterval(() => {
+      this.flush();
+    }, this.config.flushInterval);
+  }
+  installShutdownHandler() {
     if (typeof window !== "undefined") {
-      window.addEventListener("online", () => {
-        this._isOnline = true;
-        if (this.config.debug)
-          console.debug("[LogVault] Back online \u2014 draining queue");
-        this.offlineQueue?.drain();
+      window.addEventListener("beforeunload", () => {
+        this.sendBeaconFlush();
       });
-      window.addEventListener("offline", () => {
-        this._isOnline = false;
-        if (this.config.debug)
-          console.debug("[LogVault] Offline \u2014 queueing events");
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          this.sendBeaconFlush();
+        }
       });
+    }
+    if (typeof process !== "undefined" && process.on) {
+      const handler = () => {
+        this.flush();
+      };
+      process.on("beforeExit", handler);
+      process.on("SIGINT", async () => {
+        await this.destroy();
+        process.exit(0);
+      });
+      process.on("SIGTERM", async () => {
+        await this.destroy();
+        process.exit(0);
+      });
+    }
+  }
+  /**
+   * Use navigator.sendBeacon for last-chance delivery (browser only)
+   */
+  sendBeaconFlush() {
+    if (typeof navigator === "undefined" || !navigator.sendBeacon) return;
+    const items = this.queue.drain();
+    if (items.length === 0) return;
+    for (const item of items) {
+      try {
+        const blob = new Blob([JSON.stringify(item.payload)], {
+          type: "application/json"
+        });
+        const enrichedPayload = {
+          ...item.payload,
+          _auth: {
+            apiKey: this.config.apiKey,
+            apiSecret: this.config.apiSecret
+          }
+        };
+        navigator.sendBeacon(
+          this.config.endpoint,
+          new Blob([JSON.stringify(enrichedPayload)], {
+            type: "application/json"
+          })
+        );
+      } catch {
+      }
     }
   }
 };
 
 // src/index.ts
-var defaultClient = null;
+var _instance = null;
+function createLunorClient(config) {
+  return new LunorClient(config);
+}
 function init(config) {
-  if (defaultClient) {
+  if (_instance) {
     console.warn(
-      "[LogVault] Client already initialized \u2014 destroying previous instance"
+      "[Lunor] SDK already initialized. Call destroy() first to re-initialize."
     );
-    defaultClient.destroy();
+    return _instance;
   }
-  defaultClient = new LogVaultClient(config);
-  return defaultClient;
+  _instance = new LunorClient(config);
+  return _instance;
 }
-function getClient() {
-  if (!defaultClient) {
-    throw new Error("[LogVault] Client not initialized. Call init() first.");
+function getInstance() {
+  if (!_instance) {
+    throw new Error("[Lunor] SDK not initialized. Call init() first.");
   }
-  return defaultClient;
+  return _instance;
 }
-var log = (...args) => getClient().log(...args);
-var info = (...args) => getClient().info(...args);
-var warn = (...args) => getClient().warn(...args);
-var error = (...args) => getClient().error(...args);
-var fatal = (...args) => getClient().fatal(...args);
-var trace = (...args) => getClient().trace(...args);
-var captureException = (...args) => getClient().captureException(...args);
-var debug = (...args) => getClient().debug(...args);
-var security = (...args) => getClient().security(...args);
-var setContext = (...args) => getClient().setContext(...args);
-var setUser = (...args) => getClient().setUser(...args);
-var flush = () => getClient().flush();
-var destroy = () => getClient().destroy();
-
-export { LogVaultClient, PerformanceMonitor, Sanitizer, captureException, debug, destroy, error, fatal, flush, getClient, info, init, log, security, setContext, setUser, trace, warn };
-//# sourceMappingURL=index.mjs.map
+async function destroy() {
+  if (_instance) {
+    await _instance.destroy();
+    _instance = null;
+  }
+}
+var index_default = {
+  init,
+  getInstance,
+  destroy,
+  createLunorClient,
+  LunorClient,
+  LogLevel,
+  ErrorType,
+  Severity,
+  SecurityType
+};
+export {
+  ErrorType,
+  LogLevel,
+  LunorClient,
+  SecurityType,
+  Severity,
+  createLunorClient,
+  index_default as default,
+  destroy,
+  getInstance,
+  init
+};
 //# sourceMappingURL=index.mjs.map

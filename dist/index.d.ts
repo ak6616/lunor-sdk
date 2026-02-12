@@ -1,274 +1,309 @@
-/** Log severity levels */
-type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL";
-/** Error classification types */
-type ErrorType = "RUNTIME" | "SYNTAX" | "TYPE" | "REFERENCE" | "NETWORK" | "VALIDATION" | "DATABASE" | "AUTHENTICATION" | "AUTHORIZATION" | "TIMEOUT" | "MEMORY" | "UNKNOWN";
-/** Error severity levels */
-type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-/** Security event types */
-type SecurityType = "AUTH_FAILURE" | "BRUTE_FORCE" | "XSS_ATTEMPT" | "SQL_INJECTION" | "CSRF_ATTEMPT" | "RATE_LIMIT" | "SUSPICIOUS_ACTIVITY" | "DATA_BREACH" | "UNAUTHORIZED_ACCESS" | "PRIVILEGE_ESCALATION";
-/** Generic metadata object */
-type Metadata = Record<string, unknown>;
+declare enum LogLevel {
+    DEBUG = "DEBUG",
+    INFO = "INFO",
+    WARN = "WARN",
+    ERROR = "ERROR",
+    FATAL = "FATAL"
+}
+declare enum ErrorType {
+    RUNTIME = "RUNTIME",
+    SYNTAX = "SYNTAX",
+    NETWORK = "NETWORK",
+    DATABASE = "DATABASE",
+    AUTHENTICATION = "AUTHENTICATION",
+    AUTHORIZATION = "AUTHORIZATION",
+    VALIDATION = "VALIDATION",
+    TIMEOUT = "TIMEOUT",
+    MEMORY = "MEMORY",
+    UNKNOWN = "UNKNOWN"
+}
+declare enum Severity {
+    LOW = "LOW",
+    MEDIUM = "MEDIUM",
+    HIGH = "HIGH",
+    CRITICAL = "CRITICAL"
+}
+declare enum SecurityType {
+    BRUTE_FORCE = "BRUTE_FORCE",
+    UNAUTHORIZED_ACCESS = "UNAUTHORIZED_ACCESS",
+    SUSPICIOUS_ACTIVITY = "SUSPICIOUS_ACTIVITY",
+    DATA_BREACH = "DATA_BREACH",
+    INJECTION_ATTEMPT = "INJECTION_ATTEMPT",
+    XSS_ATTEMPT = "XSS_ATTEMPT",
+    CSRF_ATTEMPT = "CSRF_ATTEMPT",
+    RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
+    INVALID_TOKEN = "INVALID_TOKEN",
+    IP_BLACKLISTED = "IP_BLACKLISTED"
+}
 interface LogPayload {
     level?: LogLevel;
     message: string;
-    metadata?: Metadata;
+    metadata?: Record<string, unknown>;
     source?: string;
     timestamp?: string;
 }
 interface ErrorPayload {
     type?: ErrorType;
     message: string;
-    stack?: string | null;
-    metadata?: Metadata | null;
+    stack?: string;
+    metadata?: Record<string, unknown>;
     severity?: Severity;
     timestamp?: string;
 }
 interface DebugPayload {
     type?: string;
-    data?: Metadata;
-    performance?: Metadata | null;
+    data?: Record<string, unknown>;
+    performance?: Record<string, unknown>;
     timestamp?: string;
 }
 interface SecurityPayload {
     type?: SecurityType;
     ipAddress?: string;
-    userAgent?: string | null;
-    country?: string | null;
-    description?: string;
-    metadata?: Metadata | null;
+    userAgent?: string;
+    country?: string;
+    description: string;
+    metadata?: Record<string, unknown>;
 }
 interface WebhookPayload {
     type: "log" | "error" | "debug" | "security";
     data: LogPayload | ErrorPayload | DebugPayload | SecurityPayload;
+    _meta?: {
+        sdkVersion: string;
+        timestamp: string;
+        context?: ContextData;
+        batchId?: string;
+    };
 }
-interface WebhookResponse {
+interface LunorConfig {
+    /** API Key from your Lunor project */
+    apiKey: string;
+    /** API Secret from your Lunor project */
+    apiSecret: string;
+    /** Webhook endpoint URL */
+    endpoint?: string;
+    /** Maximum items per batch flush */
+    batchSize?: number;
+    /** Interval (ms) between automatic flushes */
+    flushInterval?: number;
+    /** Maximum retry attempts per event */
+    maxRetries?: number;
+    /** Base delay (ms) for exponential backoff */
+    retryBaseDelay?: number;
+    /** Maximum delay (ms) for exponential backoff */
+    retryMaxDelay?: number;
+    /** Request timeout (ms) */
+    timeout?: number;
+    /** Enable automatic global error capturing */
+    captureGlobalErrors?: boolean;
+    /** Enable automatic unhandled rejection capturing */
+    captureUnhandledRejections?: boolean;
+    /** Enable console method interception */
+    captureConsole?: boolean;
+    /** Console levels to capture */
+    captureConsoleLevels?: ("error" | "warn" | "log" | "debug")[];
+    /** Enable offline queue persistence (browser: localStorage, node: file) */
+    enablePersistence?: boolean;
+    /** Storage key prefix for persistence */
+    persistencePrefix?: string;
+    /** Maximum items to keep in queue */
+    maxQueueSize?: number;
+    /** Minimum log level to send (events below this are dropped) */
+    minLogLevel?: LogLevel;
+    /** Enable debug mode (verbose SDK logging) */
+    debug?: boolean;
+    /** Default source tag for logs */
+    defaultSource?: string;
+    /** Extra context to attach to every event */
+    globalContext?: Record<string, unknown>;
+    /** Environment tag */
+    environment?: string;
+    /** Release/version tag */
+    release?: string;
+    /** Tags to attach to every event */
+    tags?: Record<string, string>;
+    /** Called before each event is queued — return false to drop */
+    beforeSend?: (payload: WebhookPayload) => WebhookPayload | false | Promise<WebhookPayload | false>;
+    /** Called after a successful flush */
+    onFlushSuccess?: (count: number) => void;
+    /** Called when a flush fails after all retries */
+    onFlushError?: (error: Error, failedItems: WebhookPayload[]) => void;
+    /** Called when the SDK is ready */
+    onReady?: () => void;
+    /** Sampling rate 0.0 - 1.0 (1.0 = send everything) */
+    sampleRate?: number;
+    /** Enable automatic performance tracking */
+    enablePerformance?: boolean;
+}
+interface ContextData {
+    environment?: string;
+    release?: string;
+    tags?: Record<string, string>;
+    runtime?: "browser" | "node" | "edge" | "unknown";
+    os?: string;
+    hostname?: string;
+    userAgent?: string;
+    url?: string;
+    locale?: string;
+    timezone?: string;
+    screenResolution?: string;
+    memoryUsage?: Record<string, number>;
+    nodeVersion?: string;
+    pid?: number;
+}
+type MiddlewareFn = (payload: WebhookPayload, next: () => void) => void | Promise<void>;
+interface TransportResponse {
     success: boolean;
     id?: string;
     type?: string;
     error?: string;
+    status?: number;
 }
-interface LogVaultConfig {
-    /** Your LogVault API key */
-    apiKey: string;
-    /** Your LogVault API secret */
-    apiSecret: string;
-    /** LogVault webhook endpoint URL */
-    endpoint: string;
-    /** Enable automatic global error catching (default: false) */
-    captureGlobalErrors?: boolean;
-    /** Intercept console.log/warn/error (default: false) */
-    interceptConsole?: boolean;
-    /** Enable performance monitoring (default: false) */
-    enablePerformance?: boolean;
-    /** Minimum log level to send (default: 'DEBUG') */
-    minLevel?: LogLevel;
-    /** Enable batching — send logs in batches (default: false) */
-    enableBatching?: boolean;
-    /** Batch flush interval in ms (default: 5000) */
-    batchInterval?: number;
-    /** Max batch size before auto-flush (default: 50) */
-    batchSize?: number;
-    /** Max retry attempts for failed requests (default: 3) */
-    maxRetries?: number;
-    /** Retry delay in ms (default: 1000) */
-    retryDelay?: number;
-    /** Request timeout in ms (default: 10000) */
-    timeout?: number;
-    /** Enable offline queue — store events when offline (default: false) */
-    enableOfflineQueue?: boolean;
-    /** Max offline queue size (default: 500) */
-    maxOfflineQueueSize?: number;
-    /** Sanitize sensitive fields from metadata (default: true) */
-    sanitize?: boolean;
-    /** Fields to redact (default: common sensitive fields) */
-    sensitiveFields?: string[];
-    /** Global metadata attached to every event */
-    globalMetadata?: Metadata;
-    /** Application environment */
-    environment?: string;
-    /** Application version / release tag */
-    release?: string;
-    /** Default source tag */
-    defaultSource?: string;
-    /** Hook called before each event is sent — return false to drop */
-    beforeSend?: (event: WebhookPayload) => WebhookPayload | false | Promise<WebhookPayload | false>;
-    /** Hook called after successful send */
-    onSuccess?: (response: WebhookResponse) => void;
-    /** Hook called on send error */
-    onError?: (error: Error, event: WebhookPayload) => void;
-    /** Enable SDK debug mode (default: false) */
-    debug?: boolean;
-}
-interface BatchItem {
-    payload: WebhookPayload;
-    resolve: (value: WebhookResponse) => void;
-    reject: (reason: Error) => void;
-}
-interface LogContext {
-    userId?: string;
-    sessionId?: string;
-    requestId?: string;
-    traceId?: string;
-    tags?: string[];
-    extra?: Metadata;
-}
-interface PerformanceEntry {
+interface PerformanceMark {
     name: string;
     startTime: number;
     endTime?: number;
     duration?: number;
-    metadata?: Metadata;
+    metadata?: Record<string, unknown>;
 }
-interface QueuedEvent {
-    payload: WebhookPayload;
-    timestamp: number;
-    retries: number;
-}
+type SDKState = "idle" | "initializing" | "ready" | "flushing" | "destroyed";
 
-declare class PerformanceMonitor {
-    private client;
-    private entries;
-    constructor(client: LogVaultClient);
-    startTimer(name: string, metadata?: Record<string, unknown>): () => void;
-    stopTimer(name: string): PerformanceEntry | null;
-    /**
-     * Measure an async operation
-     */
-    measure<T>(name: string, fn: () => Promise<T>, metadata?: Record<string, unknown>): Promise<T>;
-    /**
-     * Wrap a function with automatic performance tracking
-     */
-    wrap<T extends (...args: unknown[]) => unknown>(name: string, fn: T): T;
-}
-
-declare class LogVaultClient {
+declare class LunorClient {
     private config;
-    private http;
-    private batch;
-    private offlineQueue;
-    private contextManager;
-    private sanitizer;
-    private cleanupFns;
-    private _performance;
-    private _isOnline;
-    private _initialized;
-    constructor(config: LogVaultConfig);
+    private transport;
+    private queue;
+    private middlewareChain;
+    private logger;
+    private flushTimer;
+    private globalHandlersCleanup;
+    private performanceMarks;
+    private _state;
+    private _eventCount;
+    private _flushCount;
+    private _errorCount;
+    constructor(config: LunorConfig);
     /**
-     * Send a log entry
+     * Send a log event
      */
-    log(message: string, options?: {
-        level?: LogLevel;
-        metadata?: Metadata;
-        source?: string;
-    }): Promise<WebhookResponse | null>;
-    /** Convenience: DEBUG level */
-    trace(message: string, metadata?: Metadata): Promise<WebhookResponse | null>;
-    /** Convenience: INFO level */
-    info(message: string, metadata?: Metadata): Promise<WebhookResponse | null>;
-    /** Convenience: WARN level */
-    warn(message: string, metadata?: Metadata): Promise<WebhookResponse | null>;
-    /** Convenience: ERROR level */
-    error(message: string, metadata?: Metadata): Promise<WebhookResponse | null>;
-    /** Convenience: FATAL level */
-    fatal(message: string, metadata?: Metadata): Promise<WebhookResponse | null>;
+    log(data: LogPayload | string): void;
+    /** Shortcut: DEBUG level log */
+    debug(message: string, metadata?: Record<string, unknown>): void;
+    /** Shortcut: INFO level log */
+    info(message: string, metadata?: Record<string, unknown>): void;
+    /** Shortcut: WARN level log */
+    warn(message: string, metadata?: Record<string, unknown>): void;
+    /** Shortcut: ERROR level log (as log, not error event) */
+    errorLog(message: string, metadata?: Record<string, unknown>): void;
+    /** Shortcut: FATAL level log — immediately flushes */
+    fatal(message: string, metadata?: Record<string, unknown>): void;
     /**
-     * Capture and report an error/exception
+     * Capture an error event
      */
-    captureException(error: Error | string, options?: {
-        type?: ErrorType;
+    captureError(data: ErrorPayload | Error | string): void;
+    /**
+     * Shortcut: capture an Error object
+     */
+    captureException(error: Error, extra?: {
         severity?: Severity;
-        metadata?: Metadata;
-    }): Promise<WebhookResponse | null>;
+        metadata?: Record<string, unknown>;
+    }): void;
     /**
-     * Wrap an async function with automatic error capturing
+     * Send a debug/diagnostic event
      */
-    wrapAsync<T extends (...args: unknown[]) => Promise<unknown>>(fn: T, options?: {
-        severity?: Severity;
-        metadata?: Metadata;
-    }): T;
-    /**
-     * Send debug/diagnostic data
-     */
-    debug(options: {
-        type?: string;
-        data?: Metadata;
-        performance?: Metadata;
-    }): Promise<WebhookResponse | null>;
+    captureDebug(data: DebugPayload): void;
     /**
      * Report a security event
      */
-    security(options: {
-        type?: SecurityType;
-        description: string;
-        ipAddress?: string;
-        userAgent?: string;
-        country?: string;
-        metadata?: Metadata;
-    }): Promise<WebhookResponse | null>;
+    captureSecurityEvent(data: SecurityPayload): void;
     /**
-     * Set global context (attached to every event)
+     * Start a performance measurement
      */
-    setContext(ctx: Partial<LogContext>): void;
+    startTimer(name: string, metadata?: Record<string, unknown>): void;
     /**
-     * Set user info
+     * Stop a performance measurement and optionally send as debug event
      */
-    setUser(userId: string, extra?: Metadata): void;
+    stopTimer(name: string, sendAsDebug?: boolean): PerformanceMark | null;
     /**
-     * Start a scoped context (e.g., for a request)
+     * Measure an async function's execution time
      */
-    pushScope(ctx: LogContext): void;
+    measure<T>(name: string, fn: () => Promise<T>, metadata?: Record<string, unknown>): Promise<T>;
     /**
-     * End the current scope
+     * Add a middleware that processes events before they're queued
      */
-    popScope(): void;
+    use(middleware: MiddlewareFn): this;
     /**
-     * Execute a function within a scoped context
+     * Update global context (merged with existing)
      */
-    withScope<T>(ctx: LogContext, fn: () => Promise<T>): Promise<T>;
-    get performance(): PerformanceMonitor;
+    setContext(context: Record<string, unknown>): void;
     /**
-     * Flush all pending events
+     * Set a tag
      */
-    flush(): Promise<void>;
+    setTag(key: string, value: string): void;
     /**
-     * Destroy the client — flush and clean up
+     * Set the user context
+     */
+    setUser(user: {
+        id?: string;
+        email?: string;
+        name?: string;
+        [key: string]: unknown;
+    }): void;
+    /**
+     * Force an immediate flush of the queue
+     */
+    forceFlush(): Promise<void>;
+    /**
+     * Get SDK stats
+     */
+    getStats(): {
+        state: SDKState;
+        queueSize: number;
+        totalEvents: number;
+        totalFlushes: number;
+        totalErrors: number;
+        sdkVersion: string;
+    };
+    /**
+     * Destroy the SDK instance — flushes remaining events and cleans up
      */
     destroy(): Promise<void>;
-    private validateConfig;
-    private shouldLog;
-    private enrichMetadata;
-    private classifyError;
-    private send;
-    private setupConnectivityListeners;
-}
-
-declare class Sanitizer {
-    private sensitiveFields;
-    constructor(customFields?: string[]);
-    sanitize(data: unknown, depth?: number): unknown;
-    sanitizeMetadata(metadata: Metadata | undefined): Metadata | undefined;
+    private shouldSendLogLevel;
+    private shouldSample;
+    private enqueue;
+    private flush;
+    private startFlushTimer;
+    private installShutdownHandler;
+    /**
+     * Use navigator.sendBeacon for last-chance delivery (browser only)
+     */
+    private sendBeaconFlush;
 }
 
 /**
- * Initialize the default LogVault client (singleton)
+ * Create a new Lunor client instance
  */
-declare function init(config: LogVaultConfig): LogVaultClient;
+declare function createLunorClient(config: LunorConfig): LunorClient;
 /**
- * Get the default client instance
+ * Initialize the global singleton instance
  */
-declare function getClient(): LogVaultClient;
-declare const log: (...args: Parameters<LogVaultClient["log"]>) => Promise<WebhookResponse | null>;
-declare const info: (...args: Parameters<LogVaultClient["info"]>) => Promise<WebhookResponse | null>;
-declare const warn: (...args: Parameters<LogVaultClient["warn"]>) => Promise<WebhookResponse | null>;
-declare const error: (...args: Parameters<LogVaultClient["error"]>) => Promise<WebhookResponse | null>;
-declare const fatal: (...args: Parameters<LogVaultClient["fatal"]>) => Promise<WebhookResponse | null>;
-declare const trace: (...args: Parameters<LogVaultClient["trace"]>) => Promise<WebhookResponse | null>;
-declare const captureException: (...args: Parameters<LogVaultClient["captureException"]>) => Promise<WebhookResponse | null>;
-declare const debug: (...args: Parameters<LogVaultClient["debug"]>) => Promise<WebhookResponse | null>;
-declare const security: (...args: Parameters<LogVaultClient["security"]>) => Promise<WebhookResponse | null>;
-declare const setContext: (...args: Parameters<LogVaultClient["setContext"]>) => void;
-declare const setUser: (...args: Parameters<LogVaultClient["setUser"]>) => void;
-declare const flush: () => Promise<void>;
-declare const destroy: () => Promise<void>;
+declare function init(config: LunorConfig): LunorClient;
+/**
+ * Get the global singleton instance (throws if not initialized)
+ */
+declare function getInstance(): LunorClient;
+/**
+ * Destroy the global singleton instance
+ */
+declare function destroy(): Promise<void>;
+declare const _default: {
+    init: typeof init;
+    getInstance: typeof getInstance;
+    destroy: typeof destroy;
+    createLunorClient: typeof createLunorClient;
+    LunorClient: typeof LunorClient;
+    LogLevel: typeof LogLevel;
+    ErrorType: typeof ErrorType;
+    Severity: typeof Severity;
+    SecurityType: typeof SecurityType;
+};
 
-export { type BatchItem, type DebugPayload, type ErrorPayload, type ErrorType, type LogContext, type LogLevel, type LogPayload, LogVaultClient, type LogVaultConfig, type Metadata, type PerformanceEntry, PerformanceMonitor, type QueuedEvent, Sanitizer, type SecurityPayload, type SecurityType, type Severity, type WebhookPayload, type WebhookResponse, captureException, debug, destroy, error, fatal, flush, getClient, info, init, log, security, setContext, setUser, trace, warn };
+export { type ContextData, type DebugPayload, type ErrorPayload, ErrorType, LogLevel, type LogPayload, LunorClient, type LunorConfig, type MiddlewareFn, type PerformanceMark, type SecurityPayload, SecurityType, Severity, type TransportResponse, type WebhookPayload, createLunorClient, _default as default, destroy, getInstance, init };

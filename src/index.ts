@@ -1,68 +1,95 @@
-import { LogVaultClient } from "./client";
-import { LogVaultConfig } from "./types";
+// src/index.ts
 
-export { LogVaultClient } from "./client";
-export * from "./types";
-export { PerformanceMonitor } from "./interceptors/performance";
-export { Sanitizer } from "./utils/sanitizer";
+// ============================================================================
+// IMPORTS (do użycia w tym pliku)
+// ============================================================================
 
-// ============================================================
-// Singleton — for simple single-project setups
-// ============================================================
+import { LunorClient } from "./client";
+import type { LunorConfig } from "./types";
+import { LogLevel, ErrorType, Severity, SecurityType } from "./types";
 
-let defaultClient: LogVaultClient | null = null;
+// ============================================================================
+// RE-EXPORTS (dla konsumentów SDK)
+// ============================================================================
+
+export { LunorClient } from "./client";
+export { LogLevel, ErrorType, Severity, SecurityType } from "./types";
+
+export type {
+  LunorConfig,
+  LogPayload,
+  ErrorPayload,
+  DebugPayload,
+  SecurityPayload,
+  WebhookPayload,
+  MiddlewareFn,
+  PerformanceMark,
+  ContextData,
+  TransportResponse,
+} from "./types";
+
+// ============================================================================
+// FACTORY FUNCTION
+// ============================================================================
+
+let _instance: LunorClient | null = null;
 
 /**
- * Initialize the default LogVault client (singleton)
+ * Create a new Lunor client instance
  */
-export function init(config: LogVaultConfig): LogVaultClient {
-  if (defaultClient) {
+export function createLunorClient(config: LunorConfig): LunorClient {
+  return new LunorClient(config);
+}
+
+/**
+ * Initialize the global singleton instance
+ */
+export function init(config: LunorConfig): LunorClient {
+  if (_instance) {
     console.warn(
-      "[LogVault] Client already initialized — destroying previous instance",
+      "[Lunor] SDK already initialized. Call destroy() first to re-initialize.",
     );
-    defaultClient.destroy();
+    return _instance;
   }
 
-  defaultClient = new LogVaultClient(config);
-  return defaultClient;
+  _instance = new LunorClient(config);
+  return _instance;
 }
 
 /**
- * Get the default client instance
+ * Get the global singleton instance (throws if not initialized)
  */
-export function getClient(): LogVaultClient {
-  if (!defaultClient) {
-    throw new Error("[LogVault] Client not initialized. Call init() first.");
+export function getInstance(): LunorClient {
+  if (!_instance) {
+    throw new Error("[Lunor] SDK not initialized. Call init() first.");
   }
-  return defaultClient;
+  return _instance;
 }
 
-// ============================================================
-// Convenience exports that use the default client
-// ============================================================
+/**
+ * Destroy the global singleton instance
+ */
+export async function destroy(): Promise<void> {
+  if (_instance) {
+    await _instance.destroy();
+    _instance = null;
+  }
+}
 
-export const log = (...args: Parameters<LogVaultClient["log"]>) =>
-  getClient().log(...args);
-export const info = (...args: Parameters<LogVaultClient["info"]>) =>
-  getClient().info(...args);
-export const warn = (...args: Parameters<LogVaultClient["warn"]>) =>
-  getClient().warn(...args);
-export const error = (...args: Parameters<LogVaultClient["error"]>) =>
-  getClient().error(...args);
-export const fatal = (...args: Parameters<LogVaultClient["fatal"]>) =>
-  getClient().fatal(...args);
-export const trace = (...args: Parameters<LogVaultClient["trace"]>) =>
-  getClient().trace(...args);
-export const captureException = (
-  ...args: Parameters<LogVaultClient["captureException"]>
-) => getClient().captureException(...args);
-export const debug = (...args: Parameters<LogVaultClient["debug"]>) =>
-  getClient().debug(...args);
-export const security = (...args: Parameters<LogVaultClient["security"]>) =>
-  getClient().security(...args);
-export const setContext = (...args: Parameters<LogVaultClient["setContext"]>) =>
-  getClient().setContext(...args);
-export const setUser = (...args: Parameters<LogVaultClient["setUser"]>) =>
-  getClient().setUser(...args);
-export const flush = () => getClient().flush();
-export const destroy = () => getClient().destroy();
+// ============================================================================
+// DEFAULT EXPORT
+// ============================================================================
+
+// ✅ Teraz LogLevel, ErrorType, Severity, SecurityType istnieją w scope
+//    dzięki importowi na górze pliku
+export default {
+  init,
+  getInstance,
+  destroy,
+  createLunorClient,
+  LunorClient,
+  LogLevel,
+  ErrorType,
+  Severity,
+  SecurityType,
+};

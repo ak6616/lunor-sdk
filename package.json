@@ -1,0 +1,48 @@
+{
+  "name": "@logvault/sdk",
+  "version": "1.0.0",
+  "description": "Universal SDK for LogVault — logging, error tracking, security monitoring",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/browser/index.mjs",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "keywords": [
+    "logging",
+    "error-tracking",
+    "monitoring",
+    "observability",
+    "security",
+    "logvault"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

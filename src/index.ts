@@ -1,7 +1,7 @@
 // src/index.ts
 
 // ============================================================================
-// IMPORTS (do użycia w tym pliku)
+// IMPORTS
 // ============================================================================
 
 import { LunorClient } from "./client";
@@ -9,7 +9,7 @@ import type { LunorConfig } from "./types";
 import { LogLevel, ErrorType, Severity, SecurityType } from "./types";
 
 // ============================================================================
-// RE-EXPORTS (dla konsumentów SDK)
+// RE-EXPORTS
 // ============================================================================
 
 export { LunorClient } from "./client";
@@ -29,7 +29,7 @@ export type {
 } from "./types";
 
 // ============================================================================
-// FACTORY FUNCTION
+// SINGLETON
 // ============================================================================
 
 let _instance: LunorClient | null = null;
@@ -57,7 +57,7 @@ export function init(config: LunorConfig): LunorClient {
 }
 
 /**
- * Get the global singleton instance (throws if not initialized)
+ * Get the global singleton instance
  */
 export function getInstance(): LunorClient {
   if (!_instance) {
@@ -77,12 +77,10 @@ export async function destroy(): Promise<void> {
 }
 
 // ============================================================================
-// DEFAULT EXPORT
+// ✅ NAMESPACE EXPORT zamiast default — działa z CJS i ESM bez warningów
 // ============================================================================
 
-// ✅ Teraz LogLevel, ErrorType, Severity, SecurityType istnieją w scope
-//    dzięki importowi na górze pliku
-export default {
+export const Lunor = {
   init,
   getInstance,
   destroy,
@@ -92,4 +90,4 @@ export default {
   ErrorType,
   Severity,
   SecurityType,
-};
+} as const;

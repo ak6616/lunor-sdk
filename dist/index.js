@@ -1480,7 +1480,7 @@ var LunorClient = class {
       }
       if (!navigator.sendBeacon) continue;
       const ts = Math.floor(Date.now() / 1e3).toString();
-      signRequest(this.config.apiSecret, `${ts}.${checkedSize}`, ts).then((signed) => {
+      signRequest(this.config.apiSecret, checkedSize, ts).then((signed) => {
         try {
           const enriched = {
             ...scrubbed,

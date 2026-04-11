@@ -703,7 +703,8 @@ export class LunorClient {
       // signature covers the body MINUS the auth fields, so the backend must
       // strip __sig/__ts/__key before recomputing.
       const ts = Math.floor(Date.now() / 1000).toString();
-      signRequest(this.config.apiSecret, `${ts}.${checkedSize}`, ts)
+      // signRequest prepends `${ts}.` internally — pass the raw body only.
+      signRequest(this.config.apiSecret, checkedSize, ts)
         .then((signed) => {
           try {
             const enriched = {

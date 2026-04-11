@@ -14,6 +14,7 @@ import { LogLevel, ErrorType, Severity, SecurityType } from "./types";
 
 export { LunorClient } from "./client";
 export { LogLevel, ErrorType, Severity, SecurityType } from "./types";
+export { scrubSensitive, scrubString, maskEmail } from "./scrubber";
 
 export type {
   LunorConfig,

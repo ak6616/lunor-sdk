@@ -1,7 +1,9 @@
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -15,6 +17,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/index.ts
@@ -22,14 +32,17 @@ var index_exports = {};
 __export(index_exports, {
   ErrorType: () => ErrorType,
   LogLevel: () => LogLevel,
+  Lunor: () => Lunor,
   LunorClient: () => LunorClient,
   SecurityType: () => SecurityType,
   Severity: () => Severity,
   createLunorClient: () => createLunorClient,
-  default: () => index_default,
   destroy: () => destroy,
   getInstance: () => getInstance,
-  init: () => init
+  init: () => init,
+  maskEmail: () => maskEmail,
+  scrubSensitive: () => scrubSensitive,
+  scrubString: () => scrubString
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -111,7 +124,6 @@ var LOG_LEVEL_PRIORITY = {
   ["FATAL" /* FATAL */]: 4
 };
 var HEADER_API_KEY = "X-API-Key";
-var HEADER_API_SECRET = "X-API-Secret";
 
 // src/utils.ts
 function generateId() {
@@ -219,6 +231,255 @@ function calculateBackoff(attempt, baseDelay, maxDelay) {
   return Math.min(exponentialDelay + jitter, maxDelay);
 }
 
+// src/hmac.ts
+var HEADER_SIGNATURE = "X-Lunor-Signature";
+var HEADER_TIMESTAMP = "X-Lunor-Timestamp";
+function nowUnixSeconds() {
+  return Math.floor(Date.now() / 1e3).toString();
+}
+function hexFromBuffer(buf) {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const h = bytes[i].toString(16);
+    out += h.length === 1 ? "0" + h : h;
+  }
+  return out;
+}
+async function hmacSha256Hex(secret, message) {
+  const subtle = typeof globalThis !== "undefined" ? globalThis.crypto?.subtle : void 0;
+  if (subtle) {
+    const enc = new TextEncoder();
+    const key = await subtle.importKey(
+      "raw",
+      enc.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const sig = await subtle.sign("HMAC", key, enc.encode(message));
+    return hexFromBuffer(sig);
+  }
+  try {
+    const nodeCrypto = await import("crypto");
+    return nodeCrypto.createHmac("sha256", secret).update(message).digest("hex");
+  } catch (err) {
+    throw new Error(
+      "[Lunor] No crypto implementation available for HMAC signing: " + (err instanceof Error ? err.message : String(err))
+    );
+  }
+}
+async function signRequest(apiSecret, rawBody, timestamp = nowUnixSeconds()) {
+  const signature = await hmacSha256Hex(apiSecret, `${timestamp}.${rawBody}`);
+  return {
+    [HEADER_SIGNATURE]: `v1=${signature}`,
+    [HEADER_TIMESTAMP]: timestamp
+  };
+}
+
+// src/validation.ts
+var MAX_MESSAGE_BYTES = 2 * 1024;
+var MAX_METADATA_BYTES = 8 * 1024;
+var MAX_TAGS = 20;
+var MAX_TAG_LENGTH = 64;
+var MAX_PAYLOAD_BYTES_FETCH = 256 * 1024;
+var MAX_PAYLOAD_BYTES_BEACON = 64 * 1024;
+function byteLength(str) {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(str).length;
+  }
+  return str.length;
+}
+function jsonSize(value) {
+  try {
+    return byteLength(JSON.stringify(value) ?? "");
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+function validateEventPayload(event, logger) {
+  if (!event || typeof event !== "object") {
+    logger.warn("validation: event is not an object \u2014 rejected");
+    return null;
+  }
+  const data = event.data ?? {};
+  if ("message" in data && typeof data.message === "string") {
+    const size = byteLength(data.message);
+    if (size > MAX_MESSAGE_BYTES) {
+      logger.warn(
+        `validation: message is ${size}B > ${MAX_MESSAGE_BYTES}B \u2014 truncated`
+      );
+      data.message = data.message.slice(0, MAX_MESSAGE_BYTES) + "... [truncated]";
+    }
+  }
+  if ("metadata" in data && data.metadata && typeof data.metadata === "object") {
+    const size = jsonSize(data.metadata);
+    if (size > MAX_METADATA_BYTES) {
+      logger.warn(
+        `validation: metadata is ${size}B > ${MAX_METADATA_BYTES}B \u2014 dropped`
+      );
+      data.metadata = { __lunor_dropped: "metadata exceeded size limit" };
+    }
+  }
+  const tags = event._meta?.context?.tags;
+  if (tags && typeof tags === "object") {
+    const entries = Object.entries(tags);
+    if (entries.length > MAX_TAGS) {
+      logger.warn(
+        `validation: tags count ${entries.length} > ${MAX_TAGS} \u2014 trimming`
+      );
+      const trimmed = {};
+      for (const [k, v] of entries.slice(0, MAX_TAGS)) {
+        trimmed[k.slice(0, MAX_TAG_LENGTH)] = typeof v === "string" ? v.slice(0, MAX_TAG_LENGTH) : String(v).slice(0, MAX_TAG_LENGTH);
+      }
+      if (event._meta?.context) event._meta.context.tags = trimmed;
+    } else {
+      for (const [k, v] of entries) {
+        if (k.length > MAX_TAG_LENGTH || String(v).length > MAX_TAG_LENGTH) {
+          tags[k.slice(0, MAX_TAG_LENGTH)] = String(v).slice(0, MAX_TAG_LENGTH);
+        }
+      }
+    }
+  }
+  return event;
+}
+function enforceTransportSize(rawBody, mode, logger) {
+  const limit = mode === "beacon" ? MAX_PAYLOAD_BYTES_BEACON : MAX_PAYLOAD_BYTES_FETCH;
+  const size = byteLength(rawBody);
+  if (size > limit) {
+    logger.warn(
+      `transport: payload is ${size}B > ${limit}B (${mode}) \u2014 dropped`
+    );
+    return null;
+  }
+  return rawBody;
+}
+
+// src/scrubber.ts
+var MAX_DEPTH = 5;
+var MAX_ARRAY_ITEMS = 100;
+var MAX_STRING_LENGTH = 8 * 1024;
+var DENYLIST_KEYS = [
+  /password/i,
+  /passwd/i,
+  /\bpwd\b/i,
+  /secret/i,
+  /token/i,
+  /\bauth(?:orization)?\b/i,
+  /\bapi[_-]?key\b/i,
+  /\bapi[_-]?secret\b/i,
+  /apikey/i,
+  /apisecret/i,
+  /\bjwt\b/i,
+  /\bcookie\b/i,
+  /set-cookie/i,
+  /session/i,
+  /x-api-key/i,
+  /x-api-secret/i,
+  /x-lunor-signature/i
+];
+var MASK_KEYS = [/email/i];
+var REDACTED = "[REDACTED]";
+var REDACTED_CARD = "[REDACTED_CARD]";
+var REDACTED_JWT = "[REDACTED_JWT]";
+var REDACTED_BEARER = "[REDACTED_BEARER]";
+var BEARER_RE = /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi;
+var KV_SECRET_RE = /(api[_-]?key|apikey|api[_-]?secret|apisecret|secret|password|passwd|pwd|token|auth(?:orization)?|jwt)(["'\s:=]+)([^"'\s,}\]]+)/gi;
+var EMAIL_RE = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+var JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+var CARD_CANDIDATE_RE = /\b\d{13,19}\b/g;
+function luhnValid(num) {
+  let sum = 0;
+  let alt = false;
+  for (let i = num.length - 1; i >= 0; i--) {
+    let n = num.charCodeAt(i) - 48;
+    if (n < 0 || n > 9) return false;
+    if (alt) {
+      n *= 2;
+      if (n > 9) n -= 9;
+    }
+    sum += n;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+function scrubString(input) {
+  if (typeof input !== "string") return input;
+  let out = input;
+  if (out.length > MAX_STRING_LENGTH) {
+    out = out.slice(0, MAX_STRING_LENGTH) + `... [truncated ${out.length - MAX_STRING_LENGTH} chars]`;
+  }
+  out = out.replace(JWT_RE, REDACTED_JWT);
+  out = out.replace(BEARER_RE, REDACTED_BEARER);
+  out = out.replace(KV_SECRET_RE, (_m, key, sep) => `${key}${sep}${REDACTED}`);
+  out = out.replace(EMAIL_RE, (_m, _local, domain) => `*@${domain}`);
+  out = out.replace(
+    CARD_CANDIDATE_RE,
+    (m) => luhnValid(m) ? REDACTED_CARD : m
+  );
+  return out;
+}
+function maskEmail(input) {
+  if (typeof input !== "string") return input;
+  const m = input.match(/^([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})$/);
+  if (!m) return scrubString(input);
+  return `*@${m[2]}`;
+}
+function keyInDenylist(key) {
+  for (const re of DENYLIST_KEYS) {
+    if (re.test(key)) return true;
+  }
+  return false;
+}
+function keyInMaskList(key) {
+  for (const re of MASK_KEYS) {
+    if (re.test(key)) return true;
+  }
+  return false;
+}
+function scrubSensitive(value, depth = 0) {
+  if (value === null || value === void 0) return value;
+  if (depth >= MAX_DEPTH) {
+    if (typeof value === "object") return "[MaxDepth]";
+    if (typeof value === "string") return scrubString(value);
+    return value;
+  }
+  if (typeof value === "string") return scrubString(value);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) {
+    const limited = value.slice(0, MAX_ARRAY_ITEMS);
+    const out = limited.map((v) => scrubSensitive(v, depth + 1));
+    if (value.length > MAX_ARRAY_ITEMS) {
+      out.push(`[+${value.length - MAX_ARRAY_ITEMS} more]`);
+    }
+    return out;
+  }
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: scrubString(value.message),
+      stack: value.stack ? scrubString(value.stack) : void 0
+    };
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (keyInDenylist(key)) {
+        out[key] = REDACTED;
+        continue;
+      }
+      if (keyInMaskList(key) && typeof val === "string") {
+        out[key] = maskEmail(val);
+        continue;
+      }
+      out[key] = scrubSensitive(val, depth + 1);
+    }
+    return out;
+  }
+  return void 0;
+}
+
 // src/transport.ts
 var Transport = class {
   constructor(config, logger) {
@@ -271,14 +532,23 @@ var Transport = class {
       this.config.timeout ?? 1e4
     );
     try {
+      const scrubbed = scrubSensitive(payload);
+      const rawBody = JSON.stringify(scrubbed);
+      const checked = enforceTransportSize(rawBody, "fetch", this.logger);
+      if (checked === null) {
+        const error = new Error("Payload exceeds max fetch size");
+        error.noRetry = true;
+        throw error;
+      }
+      const signed = await signRequest(this.config.apiSecret, checked);
       const response = await fetch(this.config.endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           [HEADER_API_KEY]: this.config.apiKey,
-          [HEADER_API_SECRET]: this.config.apiSecret
+          ...signed
         },
-        body: JSON.stringify(payload),
+        body: checked,
         signal: controller.signal
       });
       clearTimeout(timeoutId);
@@ -312,6 +582,9 @@ var Transport = class {
 };
 
 // src/queue.ts
+var PERSIST_TTL_MS = 2 * 60 * 60 * 1e3;
+var MAX_PERSIST_ITEM_BYTES = 8 * 1024;
+var MAX_PERSIST_TOTAL_BYTES = 1024 * 1024;
 var PersistentQueue = class {
   constructor(maxSize, storageKey, enablePersistence, logger) {
     this.items = [];
@@ -398,20 +671,50 @@ var PersistentQueue = class {
     return all;
   }
   /**
-   * Persist queue to storage
+   * Persist queue to storage.
+   *
+   * Security posture:
+   *   - Only SCRUBBED copies of each payload are written. The scrubber is
+   *     idempotent, so running it again here is a cheap defensive check even
+   *     though upstream (client.log / client.captureError) already sanitizes.
+   *   - Items serializing larger than MAX_PERSIST_ITEM_BYTES are skipped.
+   *   - Once the serialized total exceeds MAX_PERSIST_TOTAL_BYTES we stop.
    */
   persist() {
     if (!this.enablePersistence) return;
     try {
-      if (typeof localStorage !== "undefined") {
-        localStorage.setItem(this.storageKey, safeStringify(this.items));
+      if (typeof localStorage === "undefined") return;
+      const sanitized = [];
+      let totalBytes = 0;
+      for (const item of this.items) {
+        const sanitizedItem = {
+          ...item,
+          payload: scrubSensitive(item.payload)
+        };
+        const serialized = safeStringify(sanitizedItem);
+        const size = serialized.length;
+        if (size > MAX_PERSIST_ITEM_BYTES) {
+          this.logger.warn(
+            `Queue item ${item.id} is ${size}B > ${MAX_PERSIST_ITEM_BYTES}B \u2014 skipping persistence`
+          );
+          continue;
+        }
+        if (totalBytes + size > MAX_PERSIST_TOTAL_BYTES) {
+          this.logger.warn(
+            `Persistence budget exhausted (${MAX_PERSIST_TOTAL_BYTES}B) \u2014 truncating`
+          );
+          break;
+        }
+        sanitized.push(sanitizedItem);
+        totalBytes += size;
       }
+      localStorage.setItem(this.storageKey, safeStringify(sanitized));
     } catch (error) {
       this.logger.debug("Failed to persist queue:", error);
     }
   }
   /**
-   * Restore queue from storage
+   * Restore queue from storage. Items older than PERSIST_TTL_MS are dropped.
    */
   restore() {
     if (!this.enablePersistence) return;
@@ -421,8 +724,7 @@ var PersistentQueue = class {
         if (stored) {
           const parsed = safeParse(stored, []);
           this.items = parsed.filter(
-            // Only restore items less than 24h old
-            (item) => Date.now() - item.createdAt < 24 * 60 * 60 * 1e3
+            (item) => Date.now() - item.createdAt < PERSIST_TTL_MS
           );
           if (this.items.length > 0) {
             this.logger.info(
@@ -562,15 +864,17 @@ function installErrorHandler(client) {
     const handler = (event) => {
       client.captureError({
         type: "RUNTIME" /* RUNTIME */,
-        message: event.message || "Uncaught error",
-        stack: event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`,
+        message: scrubString(event.message || "Uncaught error"),
+        stack: scrubString(
+          event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`
+        ),
         severity: "HIGH" /* HIGH */,
-        metadata: {
+        metadata: scrubSensitive({
           filename: event.filename,
           lineno: event.lineno,
           colno: event.colno,
           autoCapture: true
-        }
+        })
       });
     };
     window.addEventListener("error", handler);
@@ -580,8 +884,8 @@ function installErrorHandler(client) {
     const handler = (error) => {
       client.captureError({
         type: "RUNTIME" /* RUNTIME */,
-        message: error.message || "Uncaught exception",
-        stack: error.stack,
+        message: scrubString(error.message || "Uncaught exception"),
+        stack: error.stack ? scrubString(error.stack) : void 0,
         severity: "CRITICAL" /* CRITICAL */,
         metadata: {
           name: error.name,
@@ -606,8 +910,8 @@ function installRejectionHandler(client) {
       const stack = reason instanceof Error ? reason.stack : void 0;
       client.captureError({
         type: "RUNTIME" /* RUNTIME */,
-        message: `Unhandled Promise Rejection: ${message}`,
-        stack,
+        message: scrubString(`Unhandled Promise Rejection: ${message}`),
+        stack: stack ? scrubString(stack) : void 0,
         severity: "HIGH" /* HIGH */,
         metadata: { autoCapture: true, type: "unhandledRejection" }
       });
@@ -621,8 +925,8 @@ function installRejectionHandler(client) {
       const stack = reason instanceof Error ? reason.stack : void 0;
       client.captureError({
         type: "RUNTIME" /* RUNTIME */,
-        message: `Unhandled Promise Rejection: ${message}`,
-        stack,
+        message: scrubString(`Unhandled Promise Rejection: ${message}`),
+        stack: stack ? scrubString(stack) : void 0,
         severity: "HIGH" /* HIGH */,
         metadata: { autoCapture: true, type: "unhandledRejection" }
       });
@@ -647,14 +951,18 @@ function installConsoleCapture(client, levels) {
       originalMethods[level] = original;
       console[level] = (...args) => {
         original.apply(console, args);
-        const message = args.map(
-          (arg) => typeof arg === "object" ? JSON.stringify(arg) : String(arg)
-        ).join(" ");
-        client.log({
-          level: levelMap[level] || "INFO" /* INFO */,
-          message,
-          metadata: { autoCapture: true, consoleLevel: level }
-        });
+        try {
+          const scrubbedArgs = args.map((arg) => scrubSensitive(arg));
+          const message = scrubbedArgs.map(
+            (arg) => typeof arg === "object" && arg !== null ? JSON.stringify(arg) : String(arg)
+          ).join(" ");
+          client.log({
+            level: levelMap[level] || "INFO" /* INFO */,
+            message: scrubString(message),
+            metadata: { autoCapture: true, consoleLevel: level }
+          });
+        } catch {
+        }
       };
     }
   }
@@ -726,6 +1034,8 @@ var LunorClient = class {
         ...payload,
         level: payload.level || "INFO" /* INFO */,
         source: payload.source || this.config.defaultSource,
+        message: scrubString(payload.message),
+        metadata: payload.metadata ? scrubSensitive(payload.metadata) : void 0,
         timestamp: payload.timestamp || nowISO()
       }
     });
@@ -776,8 +1086,9 @@ var LunorClient = class {
       ...payload,
       type: payload.type || "UNKNOWN" /* UNKNOWN */,
       severity: payload.severity || "MEDIUM" /* MEDIUM */,
-      message: truncate(payload.message),
-      stack: payload.stack ? truncate(payload.stack) : void 0,
+      message: truncate(scrubString(payload.message)),
+      stack: payload.stack ? truncate(scrubString(payload.stack)) : void 0,
+      metadata: payload.metadata ? scrubSensitive(payload.metadata) : void 0,
       timestamp: payload.timestamp || nowISO()
     };
     this.enqueue({ type: "error", data: finalPayload });
@@ -927,7 +1238,13 @@ var LunorClient = class {
    * Set the user context
    */
   setUser(user) {
-    this.setContext({ user });
+    const masked = { ...user };
+    if (typeof masked.email === "string") {
+      masked.email = maskEmail(masked.email);
+    }
+    this.setContext({
+      user: scrubSensitive(masked)
+    });
   }
   // ==========================================================================
   // PUBLIC API — Flush & Lifecycle
@@ -1020,6 +1337,9 @@ var LunorClient = class {
       }
       payload = processed;
     }
+    const validated = validateEventPayload(payload, this.logger);
+    if (!validated) return;
+    payload = validated;
     this.queue.enqueue(payload);
     this._eventCount++;
     this.logger.debug(
@@ -1112,32 +1432,77 @@ var LunorClient = class {
     }
   }
   /**
-   * Use navigator.sendBeacon for last-chance delivery (browser only)
+   * Last-chance delivery when the page is closing (browser only).
+   *
+   * apiSecret MUST NEVER appear in the request body. To satisfy HMAC v1 we
+   * need custom headers (X-Lunor-Signature, X-Lunor-Timestamp, X-API-Key).
+   *
+   * Strategy:
+   *   1. Prefer `fetch` with `keepalive: true` — modern browsers allow up to
+   *      64KB per request, and it DOES support custom headers, so we can
+   *      ship a properly-signed request exactly like the normal transport.
+   *   2. Fallback to `navigator.sendBeacon` ONLY when keepalive fetch is
+   *      unavailable. sendBeacon cannot set custom headers, so we embed the
+   *      HMAC signature and timestamp into the JSON body under the reserved
+   *      `__sig` / `__ts` / `__key` fields. The Lunor backend must accept
+   *      these as an alternate auth channel. The apiSecret is NEVER embedded.
    */
   sendBeaconFlush() {
-    if (typeof navigator === "undefined" || !navigator.sendBeacon) return;
+    if (typeof navigator === "undefined") return;
     const items = this.queue.drain();
     if (items.length === 0) return;
+    const keepaliveSupported = typeof fetch === "function" && typeof Request !== "undefined";
     for (const item of items) {
-      try {
-        const blob = new Blob([JSON.stringify(item.payload)], {
-          type: "application/json"
+      const scrubbed = scrubSensitive(item.payload);
+      const rawBody = JSON.stringify(scrubbed);
+      const checkedSize = enforceTransportSize(
+        rawBody,
+        keepaliveSupported ? "fetch" : "beacon",
+        this.logger
+      );
+      if (checkedSize === null) continue;
+      if (keepaliveSupported) {
+        signRequest(this.config.apiSecret, checkedSize).then((signed) => {
+          return fetch(this.config.endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              [HEADER_API_KEY]: this.config.apiKey,
+              ...signed
+            },
+            body: checkedSize,
+            keepalive: true
+          }).catch(() => {
+          });
+        }).catch(() => {
         });
-        const enrichedPayload = {
-          ...item.payload,
-          _auth: {
-            apiKey: this.config.apiKey,
-            apiSecret: this.config.apiSecret
-          }
-        };
-        navigator.sendBeacon(
-          this.config.endpoint,
-          new Blob([JSON.stringify(enrichedPayload)], {
-            type: "application/json"
-          })
-        );
-      } catch {
+        continue;
       }
+      if (!navigator.sendBeacon) continue;
+      const ts = Math.floor(Date.now() / 1e3).toString();
+      signRequest(this.config.apiSecret, `${ts}.${checkedSize}`, ts).then((signed) => {
+        try {
+          const enriched = {
+            ...scrubbed,
+            __key: this.config.apiKey,
+            __ts: ts,
+            __sig: signed["X-Lunor-Signature"]
+          };
+          const finalBody = JSON.stringify(enriched);
+          const finalChecked = enforceTransportSize(
+            finalBody,
+            "beacon",
+            this.logger
+          );
+          if (finalChecked === null) return;
+          navigator.sendBeacon(
+            this.config.endpoint,
+            new Blob([finalChecked], { type: "application/json" })
+          );
+        } catch {
+        }
+      }).catch(() => {
+      });
     }
   }
 };
@@ -1169,7 +1534,7 @@ async function destroy() {
     _instance = null;
   }
 }
-var index_default = {
+var Lunor = {
   init,
   getInstance,
   destroy,
@@ -1184,12 +1549,16 @@ var index_default = {
 0 && (module.exports = {
   ErrorType,
   LogLevel,
+  Lunor,
   LunorClient,
   SecurityType,
   Severity,
   createLunorClient,
   destroy,
   getInstance,
-  init
+  init,
+  maskEmail,
+  scrubSensitive,
+  scrubString
 });
 //# sourceMappingURL=index.js.map

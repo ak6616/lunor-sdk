@@ -26,6 +26,12 @@ import { PersistentQueue } from "./queue";
 import { MiddlewareChain } from "./middleware";
 import { collectContext } from "./context";
 import { installGlobalHandlers } from "./global-handlers";
+import { scrubSensitive, scrubString, maskEmail } from "./scrubber";
+import {
+  validateEventPayload,
+  enforceTransportSize,
+} from "./validation";
+import { signRequest } from "./hmac";
 import {
   createInternalLogger,
   generateId,
@@ -33,6 +39,7 @@ import {
   extractStack,
   truncate,
 } from "./utils";
+import { HEADER_API_KEY } from "./constants";
 
 export class LunorClient {
   // ---- Private fields ----
@@ -117,12 +124,18 @@ export class LunorClient {
 
     if (!this.shouldSendLogLevel(payload.level || LogLevel.INFO)) return;
 
+    // Scrub message + metadata up front so validation, persistence, and
+    // transport all see only sanitized data.
     this.enqueue({
       type: "log",
       data: {
         ...payload,
         level: payload.level || LogLevel.INFO,
         source: payload.source || this.config.defaultSource,
+        message: scrubString(payload.message),
+        metadata: payload.metadata
+          ? (scrubSensitive(payload.metadata) as Record<string, unknown>)
+          : undefined,
         timestamp: payload.timestamp || nowISO(),
       },
     });
@@ -178,12 +191,17 @@ export class LunorClient {
       payload = data;
     }
 
+    // Scrub message + stack + metadata. Stack traces in particular often
+    // contain query strings / URLs with tokens when code uses fetch().
     const finalPayload: ErrorPayload = {
       ...payload,
       type: payload.type || ErrorType.UNKNOWN,
       severity: payload.severity || Severity.MEDIUM,
-      message: truncate(payload.message),
-      stack: payload.stack ? truncate(payload.stack) : undefined,
+      message: truncate(scrubString(payload.message)),
+      stack: payload.stack ? truncate(scrubString(payload.stack)) : undefined,
+      metadata: payload.metadata
+        ? (scrubSensitive(payload.metadata) as Record<string, unknown>)
+        : undefined,
       timestamp: payload.timestamp || nowISO(),
     };
 
@@ -368,7 +386,15 @@ export class LunorClient {
     name?: string;
     [key: string]: unknown;
   }): void {
-    this.setContext({ user });
+    // Mask email if present, then run the whole object through the scrubber
+    // so any custom fields (token, password, etc.) are also redacted.
+    const masked: Record<string, unknown> = { ...user };
+    if (typeof masked.email === "string") {
+      masked.email = maskEmail(masked.email);
+    }
+    this.setContext({
+      user: scrubSensitive(masked) as Record<string, unknown>,
+    });
   }
 
   // ==========================================================================
@@ -487,6 +513,11 @@ export class LunorClient {
       payload = processed;
     }
 
+    // Validate + size-limit check. Rejected events are dropped with a warning.
+    const validated = validateEventPayload(payload, this.logger);
+    if (!validated) return;
+    payload = validated;
+
     this.queue.enqueue(payload);
     this._eventCount++;
 
@@ -601,38 +632,104 @@ export class LunorClient {
   }
 
   /**
-   * Use navigator.sendBeacon for last-chance delivery (browser only)
+   * Last-chance delivery when the page is closing (browser only).
+   *
+   * apiSecret MUST NEVER appear in the request body. To satisfy HMAC v1 we
+   * need custom headers (X-Lunor-Signature, X-Lunor-Timestamp, X-API-Key).
+   *
+   * Strategy:
+   *   1. Prefer `fetch` with `keepalive: true` — modern browsers allow up to
+   *      64KB per request, and it DOES support custom headers, so we can
+   *      ship a properly-signed request exactly like the normal transport.
+   *   2. Fallback to `navigator.sendBeacon` ONLY when keepalive fetch is
+   *      unavailable. sendBeacon cannot set custom headers, so we embed the
+   *      HMAC signature and timestamp into the JSON body under the reserved
+   *      `__sig` / `__ts` / `__key` fields. The Lunor backend must accept
+   *      these as an alternate auth channel. The apiSecret is NEVER embedded.
    */
   private sendBeaconFlush(): void {
-    if (typeof navigator === "undefined" || !navigator.sendBeacon) return;
+    if (typeof navigator === "undefined") return;
 
     const items = this.queue.drain();
     if (items.length === 0) return;
 
+    // Detect whether keepalive fetch is supported. Best-effort: if `fetch`
+    // exists we assume it supports `keepalive` (all evergreen browsers do).
+    const keepaliveSupported =
+      typeof fetch === "function" && typeof Request !== "undefined";
+
     for (const item of items) {
-      try {
-        const blob = new Blob([JSON.stringify(item.payload)], {
-          type: "application/json",
-        });
+      // Sanity scrub + validation before last-chance send.
+      const scrubbed = scrubSensitive(item.payload) as WebhookPayload;
+      const rawBody = JSON.stringify(scrubbed);
 
-        // sendBeacon doesn't support custom headers, so we embed auth in the payload
-        const enrichedPayload = {
-          ...item.payload,
-          _auth: {
-            apiKey: this.config.apiKey,
-            apiSecret: this.config.apiSecret,
-          },
-        };
+      const checkedSize = enforceTransportSize(
+        rawBody,
+        keepaliveSupported ? "fetch" : "beacon",
+        this.logger,
+      );
+      if (checkedSize === null) continue;
 
-        navigator.sendBeacon(
-          this.config.endpoint,
-          new Blob([JSON.stringify(enrichedPayload)], {
-            type: "application/json",
-          }),
-        );
-      } catch {
-        // Best effort — nothing we can do here
+      if (keepaliveSupported) {
+        // Preferred path: signed fetch with keepalive flag.
+        signRequest(this.config.apiSecret, checkedSize)
+          .then((signed) => {
+            return fetch(this.config.endpoint!, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                [HEADER_API_KEY]: this.config.apiKey,
+                ...signed,
+              },
+              body: checkedSize,
+              keepalive: true,
+            }).catch(() => {
+              /* best effort */
+            });
+          })
+          .catch(() => {
+            /* best effort */
+          });
+        continue;
       }
+
+      // Legacy fallback: navigator.sendBeacon. Signature must travel inside
+      // the body since no custom headers are permitted. apiSecret remains
+      // out of the body at all times.
+      if (!navigator.sendBeacon) continue;
+      // We sign the unsigned body here. Backend will re-read the `__sig` /
+      // `__ts` fields as the authenticator (NOT the HMAC of the final body)
+      // and treat this as beacon-mode auth. Documented tradeoff: beacon
+      // signature covers the body MINUS the auth fields, so the backend must
+      // strip __sig/__ts/__key before recomputing.
+      const ts = Math.floor(Date.now() / 1000).toString();
+      signRequest(this.config.apiSecret, `${ts}.${checkedSize}`, ts)
+        .then((signed) => {
+          try {
+            const enriched = {
+              ...scrubbed,
+              __key: this.config.apiKey,
+              __ts: ts,
+              __sig: signed["X-Lunor-Signature"],
+            };
+            const finalBody = JSON.stringify(enriched);
+            const finalChecked = enforceTransportSize(
+              finalBody,
+              "beacon",
+              this.logger,
+            );
+            if (finalChecked === null) return;
+            navigator.sendBeacon(
+              this.config.endpoint!,
+              new Blob([finalChecked], { type: "application/json" }),
+            );
+          } catch {
+            /* best effort */
+          }
+        })
+        .catch(() => {
+          /* best effort */
+        });
     }
   }
 }

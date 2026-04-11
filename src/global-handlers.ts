@@ -3,6 +3,7 @@
 import type { LunorClient } from "./client";
 import { ErrorType, Severity, LogLevel } from "./types";
 import { isBrowser, isNode } from "./utils";
+import { scrubSensitive, scrubString } from "./scrubber";
 
 interface ErrorHandlerCleanup {
   uninstall: () => void;
@@ -46,17 +47,18 @@ function installErrorHandler(client: LunorClient): () => void {
     const handler = (event: ErrorEvent) => {
       client.captureError({
         type: ErrorType.RUNTIME,
-        message: event.message || "Uncaught error",
-        stack:
+        message: scrubString(event.message || "Uncaught error"),
+        stack: scrubString(
           event.error?.stack ||
-          `${event.filename}:${event.lineno}:${event.colno}`,
+            `${event.filename}:${event.lineno}:${event.colno}`,
+        ),
         severity: Severity.HIGH,
-        metadata: {
+        metadata: scrubSensitive({
           filename: event.filename,
           lineno: event.lineno,
           colno: event.colno,
           autoCapture: true,
-        },
+        }) as Record<string, unknown>,
       });
     };
 
@@ -68,8 +70,8 @@ function installErrorHandler(client: LunorClient): () => void {
     const handler = (error: Error) => {
       client.captureError({
         type: ErrorType.RUNTIME,
-        message: error.message || "Uncaught exception",
-        stack: error.stack,
+        message: scrubString(error.message || "Uncaught exception"),
+        stack: error.stack ? scrubString(error.stack) : undefined,
         severity: Severity.CRITICAL,
         metadata: {
           name: error.name,
@@ -102,8 +104,8 @@ function installRejectionHandler(client: LunorClient): () => void {
 
       client.captureError({
         type: ErrorType.RUNTIME,
-        message: `Unhandled Promise Rejection: ${message}`,
-        stack,
+        message: scrubString(`Unhandled Promise Rejection: ${message}`),
+        stack: stack ? scrubString(stack) : undefined,
         severity: Severity.HIGH,
         metadata: { autoCapture: true, type: "unhandledRejection" },
       });
@@ -124,8 +126,8 @@ function installRejectionHandler(client: LunorClient): () => void {
 
       client.captureError({
         type: ErrorType.RUNTIME,
-        message: `Unhandled Promise Rejection: ${message}`,
-        stack,
+        message: scrubString(`Unhandled Promise Rejection: ${message}`),
+        stack: stack ? scrubString(stack) : undefined,
         severity: Severity.HIGH,
         metadata: { autoCapture: true, type: "unhandledRejection" },
       });
@@ -162,22 +164,30 @@ function installConsoleCapture(
       (console as unknown as Record<string, unknown>)[level] = (
         ...args: unknown[]
       ) => {
-        // Call original console method
+        // Call original console method with the ORIGINAL, unscrubbed args —
+        // the developer must still see real data in their devtools.
         original.apply(console, args);
 
-        // Send to Lunor
-        const message = args
-          .map((arg) =>
-            typeof arg === "object" ? JSON.stringify(arg) : String(arg),
-          )
-          .join(" ");
+        // For the event sent to Lunor, scrub every argument first so we
+        // never ship tokens, passwords, emails, or similar PII upstream.
+        try {
+          const scrubbedArgs = args.map((arg) => scrubSensitive(arg));
+          const message = scrubbedArgs
+            .map((arg) =>
+              typeof arg === "object" && arg !== null
+                ? JSON.stringify(arg)
+                : String(arg),
+            )
+            .join(" ");
 
-        // ✅ Teraz levelMap zwraca LogLevel enum — żaden cast nie jest potrzebny
-        client.log({
-          level: levelMap[level] || LogLevel.INFO,
-          message,
-          metadata: { autoCapture: true, consoleLevel: level },
-        });
+          client.log({
+            level: levelMap[level] || LogLevel.INFO,
+            message: scrubString(message),
+            metadata: { autoCapture: true, consoleLevel: level },
+          });
+        } catch {
+          // Never let console capture break the host app.
+        }
       };
     }
   }

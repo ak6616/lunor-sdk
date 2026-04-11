@@ -65,4 +65,11 @@ export const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
 };
 
 export const HEADER_API_KEY = "X-API-Key";
+/**
+ * @deprecated Since SDK v2.1 the apiSecret is NEVER transmitted. It is used
+ * only locally as an HMAC signing key. This constant is retained for backwards
+ * compatibility of existing imports but MUST NOT be added to any request.
+ */
 export const HEADER_API_SECRET = "X-API-Secret";
+export const HEADER_LUNOR_SIGNATURE = "X-Lunor-Signature";
+export const HEADER_LUNOR_TIMESTAMP = "X-Lunor-Timestamp";

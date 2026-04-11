@@ -3,6 +3,17 @@
 import type { QueueItem, WebhookPayload } from "./types";
 import { generateId, safeParse, safeStringify } from "./utils";
 import type { createInternalLogger } from "./utils";
+import { scrubSensitive } from "./scrubber";
+
+// Persistence TTL lowered from 24h to 2h — shrinks the window during which
+// any (already-sanitized) event could sit in localStorage.
+const PERSIST_TTL_MS = 2 * 60 * 60 * 1000;
+
+// Hard caps on what we write to localStorage. The client is expected to scrub
+// upstream; these are a last-line defense against a single runaway payload
+// filling the user's storage or exposing PII long-term.
+const MAX_PERSIST_ITEM_BYTES = 8 * 1024; // 8KB per event
+const MAX_PERSIST_TOTAL_BYTES = 1024 * 1024; // 1MB total
 
 export class PersistentQueue {
   private items: QueueItem[] = [];
@@ -118,22 +129,56 @@ export class PersistentQueue {
   }
 
   /**
-   * Persist queue to storage
+   * Persist queue to storage.
+   *
+   * Security posture:
+   *   - Only SCRUBBED copies of each payload are written. The scrubber is
+   *     idempotent, so running it again here is a cheap defensive check even
+   *     though upstream (client.log / client.captureError) already sanitizes.
+   *   - Items serializing larger than MAX_PERSIST_ITEM_BYTES are skipped.
+   *   - Once the serialized total exceeds MAX_PERSIST_TOTAL_BYTES we stop.
    */
   private persist(): void {
     if (!this.enablePersistence) return;
 
     try {
-      if (typeof localStorage !== "undefined") {
-        localStorage.setItem(this.storageKey, safeStringify(this.items));
+      if (typeof localStorage === "undefined") return;
+
+      const sanitized: QueueItem[] = [];
+      let totalBytes = 0;
+
+      for (const item of this.items) {
+        const sanitizedItem: QueueItem = {
+          ...item,
+          payload: scrubSensitive(item.payload) as WebhookPayload,
+        };
+        const serialized = safeStringify(sanitizedItem);
+        const size = serialized.length;
+
+        if (size > MAX_PERSIST_ITEM_BYTES) {
+          this.logger.warn(
+            `Queue item ${item.id} is ${size}B > ${MAX_PERSIST_ITEM_BYTES}B — skipping persistence`,
+          );
+          continue;
+        }
+        if (totalBytes + size > MAX_PERSIST_TOTAL_BYTES) {
+          this.logger.warn(
+            `Persistence budget exhausted (${MAX_PERSIST_TOTAL_BYTES}B) — truncating`,
+          );
+          break;
+        }
+        sanitized.push(sanitizedItem);
+        totalBytes += size;
       }
+
+      localStorage.setItem(this.storageKey, safeStringify(sanitized));
     } catch (error) {
       this.logger.debug("Failed to persist queue:", error);
     }
   }
 
   /**
-   * Restore queue from storage
+   * Restore queue from storage. Items older than PERSIST_TTL_MS are dropped.
    */
   private restore(): void {
     if (!this.enablePersistence) return;
@@ -144,8 +189,7 @@ export class PersistentQueue {
         if (stored) {
           const parsed = safeParse<QueueItem[]>(stored, []);
           this.items = parsed.filter(
-            // Only restore items less than 24h old
-            (item) => Date.now() - item.createdAt < 24 * 60 * 60 * 1000,
+            (item) => Date.now() - item.createdAt < PERSIST_TTL_MS,
           );
 
           if (this.items.length > 0) {

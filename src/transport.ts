@@ -1,8 +1,11 @@
 // src/transport.ts
 
 import type { WebhookPayload, TransportResponse, LunorConfig } from "./types";
-import { HEADER_API_KEY, HEADER_API_SECRET } from "./constants";
+import { HEADER_API_KEY } from "./constants";
 import { withRetry } from "./retry";
+import { signRequest } from "./hmac";
+import { enforceTransportSize } from "./validation";
+import { scrubSensitive } from "./scrubber";
 import type { createInternalLogger } from "./utils";
 
 export class Transport {
@@ -70,14 +73,31 @@ export class Transport {
     );
 
     try {
+      // Defensive final scrub — should already be sanitized upstream by the
+      // client, but we never want raw secrets leaving the process.
+      const scrubbed = scrubSensitive(payload) as WebhookPayload;
+
+      // Compute the raw body ONCE — the HMAC signature must cover exactly
+      // the bytes we send, so we reuse the same string for signing and body.
+      const rawBody = JSON.stringify(scrubbed);
+
+      const checked = enforceTransportSize(rawBody, "fetch", this.logger);
+      if (checked === null) {
+        const error = new Error("Payload exceeds max fetch size");
+        (error as unknown as Record<string, unknown>).noRetry = true;
+        throw error;
+      }
+
+      const signed = await signRequest(this.config.apiSecret, checked);
+
       const response = await fetch(this.config.endpoint!, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           [HEADER_API_KEY]: this.config.apiKey,
-          [HEADER_API_SECRET]: this.config.apiSecret,
+          ...signed,
         },
-        body: JSON.stringify(payload),
+        body: checked,
         signal: controller.signal,
       });
 

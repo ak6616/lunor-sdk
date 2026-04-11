@@ -273,10 +273,39 @@ declare class LunorClient {
     private startFlushTimer;
     private installShutdownHandler;
     /**
-     * Use navigator.sendBeacon for last-chance delivery (browser only)
+     * Last-chance delivery when the page is closing (browser only).
+     *
+     * apiSecret MUST NEVER appear in the request body. To satisfy HMAC v1 we
+     * need custom headers (X-Lunor-Signature, X-Lunor-Timestamp, X-API-Key).
+     *
+     * Strategy:
+     *   1. Prefer `fetch` with `keepalive: true` — modern browsers allow up to
+     *      64KB per request, and it DOES support custom headers, so we can
+     *      ship a properly-signed request exactly like the normal transport.
+     *   2. Fallback to `navigator.sendBeacon` ONLY when keepalive fetch is
+     *      unavailable. sendBeacon cannot set custom headers, so we embed the
+     *      HMAC signature and timestamp into the JSON body under the reserved
+     *      `__sig` / `__ts` / `__key` fields. The Lunor backend must accept
+     *      these as an alternate auth channel. The apiSecret is NEVER embedded.
      */
     private sendBeaconFlush;
 }
+
+/**
+ * Scrub a string: apply all token / secret / PII regex replacements.
+ */
+declare function scrubString(input: string): string;
+/**
+ * Mask an email address: `alice@example.com` → `*@example.com`.
+ * Returns the input unchanged if it is not a plausible email.
+ */
+declare function maskEmail(input: string): string;
+/**
+ * Recursively scrub a value. Primitive strings get regex redaction, objects
+ * get key-based redaction, arrays are capped at MAX_ARRAY_ITEMS, and recursion
+ * is capped at MAX_DEPTH.
+ */
+declare function scrubSensitive(value: unknown, depth?: number): unknown;
 
 /**
  * Create a new Lunor client instance
@@ -287,23 +316,23 @@ declare function createLunorClient(config: LunorConfig): LunorClient;
  */
 declare function init(config: LunorConfig): LunorClient;
 /**
- * Get the global singleton instance (throws if not initialized)
+ * Get the global singleton instance
  */
 declare function getInstance(): LunorClient;
 /**
  * Destroy the global singleton instance
  */
 declare function destroy(): Promise<void>;
-declare const _default: {
-    init: typeof init;
-    getInstance: typeof getInstance;
-    destroy: typeof destroy;
-    createLunorClient: typeof createLunorClient;
-    LunorClient: typeof LunorClient;
-    LogLevel: typeof LogLevel;
-    ErrorType: typeof ErrorType;
-    Severity: typeof Severity;
-    SecurityType: typeof SecurityType;
+declare const Lunor: {
+    readonly init: typeof init;
+    readonly getInstance: typeof getInstance;
+    readonly destroy: typeof destroy;
+    readonly createLunorClient: typeof createLunorClient;
+    readonly LunorClient: typeof LunorClient;
+    readonly LogLevel: typeof LogLevel;
+    readonly ErrorType: typeof ErrorType;
+    readonly Severity: typeof Severity;
+    readonly SecurityType: typeof SecurityType;
 };
 
-export { type ContextData, type DebugPayload, type ErrorPayload, ErrorType, LogLevel, type LogPayload, LunorClient, type LunorConfig, type MiddlewareFn, type PerformanceMark, type SecurityPayload, SecurityType, Severity, type TransportResponse, type WebhookPayload, createLunorClient, _default as default, destroy, getInstance, init };
+export { type ContextData, type DebugPayload, type ErrorPayload, ErrorType, LogLevel, type LogPayload, Lunor, LunorClient, type LunorConfig, type MiddlewareFn, type PerformanceMark, type SecurityPayload, SecurityType, Severity, type TransportResponse, type WebhookPayload, createLunorClient, destroy, getInstance, init, maskEmail, scrubSensitive, scrubString };

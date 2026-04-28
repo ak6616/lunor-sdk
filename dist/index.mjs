@@ -49,7 +49,7 @@ var SecurityType = /* @__PURE__ */ ((SecurityType2) => {
 })(SecurityType || {});
 
 // src/constants.ts
-var SDK_VERSION = "2.0.0";
+var SDK_VERSION = "2.2.0";
 var SDK_NAME = "lunor-sdk";
 var LUNOR_ENDPOINT = "https://www.lunor.com.pl/api/webhook";
 var DEFAULT_CONFIG = {
@@ -461,28 +461,119 @@ var Transport = class {
     });
   }
   /**
-   * Send a batch of payloads
+   * Send a batch of payloads in a single HTTP request using the {events:[...]}
+   * envelope. Server (lunor /api/webhook >= Plan 2) accepts both single-event
+   * and batched formats. Falls back to per-event sends if the server returns
+   * 4xx on the batch (e.g. older deploy without batched support).
+   *
+   * MAX_EVENTS_PER_BATCH on the server is 100 — caller (LunorClient.flush)
+   * already drives flushing by batchSize so we just chunk at that limit here
+   * as a safety net.
    */
   async sendBatch(payloads) {
+    if (payloads.length === 0) return [];
+    if (payloads.length === 1) {
+      return [await this.send(payloads[0])];
+    }
     const results = [];
-    const concurrencyLimit = 5;
-    for (let i = 0; i < payloads.length; i += concurrencyLimit) {
-      const chunk = payloads.slice(i, i + concurrencyLimit);
-      const chunkResults = await Promise.allSettled(
-        chunk.map((payload) => this.send(payload))
-      );
-      for (const result of chunkResults) {
-        if (result.status === "fulfilled") {
-          results.push(result.value);
-        } else {
-          results.push({
-            success: false,
-            error: result.reason?.message || "Unknown error"
-          });
+    const MAX_PER_BATCH = 100;
+    for (let i = 0; i < payloads.length; i += MAX_PER_BATCH) {
+      const chunk = payloads.slice(i, i + MAX_PER_BATCH);
+      try {
+        const batchResults = await withRetry(() => this.doSendBatch(chunk), {
+          maxRetries: this.config.maxRetries ?? 3,
+          baseDelay: this.config.retryBaseDelay ?? 1e3,
+          maxDelay: this.config.retryMaxDelay ?? 3e4,
+          onRetry: (attempt, error) => {
+            this.logger.warn(
+              `Retry attempt ${attempt} for batch of ${chunk.length}: ${error.message}`
+            );
+          }
+        });
+        results.push(...batchResults);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        for (let j = 0; j < chunk.length; j++) {
+          results.push({ success: false, error: message });
         }
       }
     }
     return results;
+  }
+  async doSendBatch(payloads) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      this.config.timeout ?? 1e4
+    );
+    try {
+      const scrubbed = payloads.map(
+        (p) => scrubSensitive(p)
+      );
+      const envelope = { events: scrubbed };
+      const rawBody = JSON.stringify(envelope);
+      const checked = enforceTransportSize(rawBody, "fetch", this.logger);
+      if (checked === null) {
+        const error = new Error("Batch payload exceeds max fetch size");
+        error.noRetry = true;
+        throw error;
+      }
+      const signed = await signRequest(this.config.apiSecret, checked);
+      const response = await fetch(this.config.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [HEADER_API_KEY]: this.config.apiKey,
+          ...signed
+        },
+        body: checked,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        const body = await response.text().catch(() => "No body");
+        if (response.status === 400) {
+          this.logger.warn(
+            "Batch rejected with 400 \u2014 falling back to per-event sends"
+          );
+          const fallback = [];
+          for (const payload of payloads) {
+            fallback.push(await this.send(payload));
+          }
+          return fallback;
+        }
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          const error = new Error(`HTTP ${response.status}: ${body}`);
+          error.noRetry = true;
+          throw error;
+        }
+        throw new Error(`HTTP ${response.status}: ${body}`);
+      }
+      const json = await response.json();
+      const acked = Array.isArray(json.events) ? json.events : [];
+      const results = [];
+      for (let i = 0; i < payloads.length; i++) {
+        const ack = acked[i];
+        if (ack && typeof ack.id === "string") {
+          results.push({ success: true, id: ack.id, type: ack.type });
+        } else {
+          results.push({ success: true });
+        }
+      }
+      return results;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.noRetry) {
+        this.logger.error(
+          `Non-retryable batch error: ${error.message}`
+        );
+        return payloads.map(() => ({
+          success: false,
+          error: error.message
+        }));
+      }
+      throw error;
+    }
   }
   async doSend(payload) {
     const controller = new AbortController();

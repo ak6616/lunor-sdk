@@ -137,10 +137,19 @@ describe("Transport", () => {
   });
 
   describe("sendBatch", () => {
-    it("sends all payloads and returns results", async () => {
+    it("sends multiple payloads in one batched request", async () => {
+      // True batching: N events → 1 HTTP request with {events:[...]} envelope.
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({ id: "e1", type: "log" }),
+        json: async () => ({
+          success: true,
+          count: 3,
+          events: [
+            { id: "e1", type: "log" },
+            { id: "e2", type: "log" },
+            { id: "e3", type: "log" },
+          ],
+        }),
       });
 
       const t = new Transport(makeConfig(), logger);
@@ -149,53 +158,93 @@ describe("Transport", () => {
 
       expect(results).toHaveLength(3);
       results.forEach((r) => expect(r.success).toBe(true));
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const callArgs = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls[0];
+      const body = JSON.parse((callArgs[1] as { body: string }).body);
+      expect(Array.isArray(body.events)).toBe(true);
+      expect(body.events).toHaveLength(3);
     });
 
-    it("marks failed payloads as unsuccessful in results", async () => {
+    it("falls back to per-event sends when server returns 400 on batch", async () => {
+      // Old server (pre-Plan 2) doesn't accept {events:[]} → 400.
+      // SDK should retry each event individually using legacy single format.
       global.fetch = vi
         .fn()
+        // Batched call → 400
         .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ id: "e1", type: "log" }),
-        })
-        .mockResolvedValue({
           ok: false,
           status: 400,
-          text: async () => "Bad Request",
+          text: async () => "Invalid payload format",
+        })
+        // Per-event fallback calls succeed
+        .mockResolvedValue({
+          ok: true,
+          json: async () => ({ id: "fallback-id", type: "log" }),
         });
 
       const t = new Transport(makeConfig(), logger);
       const results = await t.sendBatch([makePayload(), makePayload()]);
 
-      expect(results[0].success).toBe(true);
-      expect(results[1].success).toBe(false);
+      expect(results).toHaveLength(2);
+      expect(results.every((r) => r.success)).toBe(true);
+      // 1 batched + 2 per-event = 3 calls
+      expect(fetch).toHaveBeenCalledTimes(3);
     });
 
-    it("handles batches larger than concurrency limit (5)", async () => {
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ id: "e1", type: "log" }),
+    it("chunks batches > 100 events", async () => {
+      global.fetch = vi.fn().mockImplementation((_url, options) => {
+        const body = JSON.parse((options as { body: string }).body);
+        const events = body.events as unknown[];
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            count: events.length,
+            events: events.map((_, i) => ({ id: `e${i}`, type: "log" })),
+          }),
+        });
       });
 
       const t = new Transport(makeConfig(), logger);
-      const payloads = Array.from({ length: 12 }, makePayload);
+      const payloads = Array.from({ length: 250 }, makePayload);
       const results = await t.sendBatch(payloads);
 
-      expect(results).toHaveLength(12);
-      expect(fetch).toHaveBeenCalledTimes(12);
+      expect(results).toHaveLength(250);
+      // 250 events → 100 + 100 + 50 = 3 batched requests
+      expect(fetch).toHaveBeenCalledTimes(3);
     });
 
-    it("handles rejected promises in batch gracefully", async () => {
+    it("marks all events failed when batch fetch rejects after retries", async () => {
       global.fetch = vi.fn().mockRejectedValue(new Error("network down"));
 
       const t = new Transport(makeConfig({ maxRetries: 0 }), logger);
-      const promise = t.sendBatch([makePayload()]);
+      const promise = t.sendBatch([makePayload(), makePayload()]);
       await vi.runAllTimersAsync();
 
-      // withRetry exhausts retries, Promise.allSettled catches it
       const results = await promise;
-      expect(results[0].success).toBe(false);
-      expect(results[0].error).toContain("network down");
+      expect(results).toHaveLength(2);
+      results.forEach((r) => {
+        expect(r.success).toBe(false);
+        expect(r.error).toContain("network down");
+      });
+    });
+
+    it("uses single-send path when given exactly 1 payload", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "single", type: "log" }),
+      });
+
+      const t = new Transport(makeConfig(), logger);
+      const results = await t.sendBatch([makePayload()]);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].success).toBe(true);
+      // Single-event path → bare {type,data}, not wrapped in events:[]
+      const callArgs = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls[0];
+      const body = JSON.parse((callArgs[1] as { body: string }).body);
+      expect(body.events).toBeUndefined();
+      expect(body.type).toBeDefined();
     });
 
     it("returns empty array for empty input", async () => {

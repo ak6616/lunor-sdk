@@ -28,7 +28,7 @@
     "url": "git+https://github.com/ak6616/lunor-sdk.git"
   },
   "devDependencies": {
-    "@types/node": "^20.19.33",
+    "@types/node": "^25.6.0",
     "@vitest/coverage-v8": "^4.1.2",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",

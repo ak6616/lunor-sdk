@@ -1,7 +1,6 @@
 {
-  "name": "lunor-sdk",
+  "name": "@ak6616/lunor-sdk",
   "version": "2.2.0",
-  "private": true,
   "description": "Private monitoring SDK for Lunor platform",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -38,6 +37,7 @@
     "node": ">=20"
   },
   "publishConfig": {
-    "provenance": true
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
   }
 }

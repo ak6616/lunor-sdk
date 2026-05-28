@@ -1,0 +1,30 @@
+name: Publish to GitHub Packages
+
+# Publishes @ak6616/lunor-sdk to GitHub Packages on every version tag (vX.Y.Z)
+# or via manual dispatch. Uses the workflow's GITHUB_TOKEN (packages:write) —
+# no personal access tokens stored in the repo.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@ak6616"
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,7 +2,7 @@
 
 import { LogLevel, type LunorConfig } from "./types";
 
-export const SDK_VERSION = "2.2.0";
+export const SDK_VERSION = "2.3.0";
 export const SDK_NAME = "lunor-sdk";
 
 // Twój prywatny endpoint — hardcoded, nie do nadpisania przez klientów

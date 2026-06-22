@@ -33,7 +33,9 @@ declare enum SecurityType {
     CSRF_ATTEMPT = "CSRF_ATTEMPT",
     RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
     INVALID_TOKEN = "INVALID_TOKEN",
-    IP_BLACKLISTED = "IP_BLACKLISTED"
+    IP_BLACKLISTED = "IP_BLACKLISTED",
+    FIREWALL_BLOCK = "FIREWALL_BLOCK",
+    FIREWALL_WOULD_BLOCK = "FIREWALL_WOULD_BLOCK"
 }
 interface LogPayload {
     level?: LogLevel;
@@ -291,6 +293,63 @@ declare class LunorClient {
     private sendBeaconFlush;
 }
 
+interface BlockEntryLite {
+    type: string;
+    value: string;
+    expiresAt?: string | null;
+}
+
+interface FirewallState {
+    mode: 'OFF' | 'MONITOR' | 'ENFORCE';
+    entries: BlockEntryLite[];
+    fetchedAt: number;
+}
+interface StoreOptions {
+    apiKey: string;
+    apiSecret: string;
+    blocklistUrl: string;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+    fetchImpl?: typeof fetch;
+    snapshotPath?: string;
+    logger?: (msg: string, err?: unknown) => void;
+}
+declare class BlocklistStore {
+    private opts;
+    private state;
+    private etag;
+    private timer;
+    private consecutiveErrors;
+    private fetchImpl;
+    private log;
+    constructor(opts: StoreOptions);
+    getState(): FirewallState | null;
+    start(): void;
+    stop(): void;
+    private scheduleNext;
+    private tick;
+    refreshOnce(): Promise<void>;
+    private loadSnapshot;
+    private saveSnapshot;
+}
+
+interface FirewallOptions {
+    client: LunorClient;
+    apiKey: string;
+    apiSecret: string;
+    /** Bazowy endpoint webhooka; blocklista wyprowadzana automatycznie. */
+    endpoint?: string;
+    pollIntervalMs?: number;
+    /** Ścieżka snapshotu na dysku (tylko długo-żyjące procesy, np. Express). */
+    snapshotPath?: string;
+}
+declare function createFirewall(opts: FirewallOptions): {
+    store: BlocklistStore;
+    express: () => (req: any, res: any, next: any) => void;
+    start: () => void;
+    stop: () => void;
+};
+
 /**
  * Scrub a string: apply all token / secret / PII regex replacements.
  */
@@ -328,6 +387,7 @@ declare const Lunor: {
     readonly getInstance: typeof getInstance;
     readonly destroy: typeof destroy;
     readonly createLunorClient: typeof createLunorClient;
+    readonly createFirewall: typeof createFirewall;
     readonly LunorClient: typeof LunorClient;
     readonly LogLevel: typeof LogLevel;
     readonly ErrorType: typeof ErrorType;
@@ -335,4 +395,4 @@ declare const Lunor: {
     readonly SecurityType: typeof SecurityType;
 };
 
-export { type ContextData, type DebugPayload, type ErrorPayload, ErrorType, LogLevel, type LogPayload, Lunor, LunorClient, type LunorConfig, type MiddlewareFn, type PerformanceMark, type SecurityPayload, SecurityType, Severity, type TransportResponse, type WebhookPayload, createLunorClient, destroy, getInstance, init, maskEmail, scrubSensitive, scrubString };
+export { type ContextData, type DebugPayload, type ErrorPayload, ErrorType, type FirewallOptions, LogLevel, type LogPayload, Lunor, LunorClient, type LunorConfig, type MiddlewareFn, type PerformanceMark, type SecurityPayload, SecurityType, Severity, type TransportResponse, type WebhookPayload, createFirewall, createLunorClient, destroy, getInstance, init, maskEmail, scrubSensitive, scrubString };

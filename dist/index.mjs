@@ -45,11 +45,13 @@ var SecurityType = /* @__PURE__ */ ((SecurityType2) => {
   SecurityType2["RATE_LIMIT_EXCEEDED"] = "RATE_LIMIT_EXCEEDED";
   SecurityType2["INVALID_TOKEN"] = "INVALID_TOKEN";
   SecurityType2["IP_BLACKLISTED"] = "IP_BLACKLISTED";
+  SecurityType2["FIREWALL_BLOCK"] = "FIREWALL_BLOCK";
+  SecurityType2["FIREWALL_WOULD_BLOCK"] = "FIREWALL_WOULD_BLOCK";
   return SecurityType2;
 })(SecurityType || {});
 
 // src/constants.ts
-var SDK_VERSION = "2.2.0";
+var SDK_VERSION = "2.3.0";
 var SDK_NAME = "lunor-sdk";
 var LUNOR_ENDPOINT = "https://www.lunor.com.pl/api/webhook";
 var DEFAULT_CONFIG = {
@@ -1557,6 +1559,243 @@ var LunorClient = class {
   }
 };
 
+// src/firewall/store.ts
+var DEFAULT_POLL = 45e3;
+var DEFAULT_TIMEOUT = 3e3;
+var MAX_BACKOFF = 3e5;
+var BlocklistStore = class {
+  constructor(opts) {
+    this.state = null;
+    this.etag = null;
+    this.timer = null;
+    this.consecutiveErrors = 0;
+    this.opts = opts;
+    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+    this.log = opts.logger ?? ((m, e) => console.warn("[Lunor firewall] " + m, e ?? ""));
+    this.loadSnapshot();
+  }
+  getState() {
+    return this.state;
+  }
+  start() {
+    if (this.timer) return;
+    void this.tick();
+  }
+  stop() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+  scheduleNext() {
+    const base = this.opts.pollIntervalMs ?? DEFAULT_POLL;
+    const delay = this.consecutiveErrors === 0 ? base : Math.min(base * 2 ** this.consecutiveErrors, MAX_BACKOFF);
+    this.timer = setTimeout(() => void this.tick(), delay);
+    if (typeof this.timer?.unref === "function") this.timer.unref();
+  }
+  async tick() {
+    await this.refreshOnce();
+    this.scheduleNext();
+  }
+  // Jedno pobranie. NIGDY nie rzuca (fail-open). Aktualizuje cache tylko przy 200.
+  async refreshOnce() {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), this.opts.timeoutMs ?? DEFAULT_TIMEOUT);
+    try {
+      const auth = await signRequest(this.opts.apiSecret, "");
+      const headers = {
+        [HEADER_API_KEY]: this.opts.apiKey,
+        ...auth
+      };
+      if (this.etag) headers["If-None-Match"] = this.etag;
+      const res = await this.fetchImpl(this.opts.blocklistUrl, {
+        method: "GET",
+        headers,
+        signal: controller.signal
+      });
+      if (res.status === 304) {
+        this.consecutiveErrors = 0;
+        return;
+      }
+      if (!res.ok) {
+        this.consecutiveErrors++;
+        this.log(`blocklist poll status ${res.status}`);
+        return;
+      }
+      const body = await res.json();
+      const newEtag = res.headers.get("ETag");
+      this.state = { mode: body.mode, entries: body.entries ?? [], fetchedAt: Date.now() };
+      this.etag = newEtag;
+      this.consecutiveErrors = 0;
+      this.saveSnapshot();
+    } catch (err) {
+      this.consecutiveErrors++;
+      this.log("blocklist poll failed (fail-open, zachowuj\u0119 cache)", err);
+    } finally {
+      clearTimeout(to);
+    }
+  }
+  // ---- Snapshot na dysku (opcjonalny; tylko długo-żyjące procesy / pizza) ----
+  // Guard `typeof require` — build ESM (tsup) nie ma `require`; tam snapshot
+  // jest po prostu nieaktywny (fail-open), zamiast rzucać ReferenceError.
+  loadSnapshot() {
+    if (!this.opts.snapshotPath || typeof __require !== "function") return;
+    try {
+      const fs = __require("fs");
+      if (!fs.existsSync(this.opts.snapshotPath)) return;
+      const raw = fs.readFileSync(this.opts.snapshotPath, "utf8");
+      const snap = JSON.parse(raw);
+      if (snap && snap.mode && Array.isArray(snap.entries)) {
+        this.state = snap;
+      }
+    } catch (err) {
+      this.log("nie uda\u0142o si\u0119 wczyta\u0107 snapshotu (ignoruj\u0119)", err);
+    }
+  }
+  saveSnapshot() {
+    if (!this.opts.snapshotPath || !this.state || typeof __require !== "function") return;
+    try {
+      const fs = __require("fs");
+      fs.writeFileSync(this.opts.snapshotPath, JSON.stringify(this.state), "utf8");
+    } catch (err) {
+      this.log("nie uda\u0142o si\u0119 zapisa\u0107 snapshotu (ignoruj\u0119)", err);
+    }
+  }
+};
+
+// src/firewall/matcher.ts
+var IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+function normalizeIp(raw) {
+  const s = (raw ?? "").trim().toLowerCase();
+  if (s.startsWith("::ffff:")) {
+    const rest = s.slice(7);
+    if (IPV4_RE.test(rest)) return rest;
+  }
+  return s;
+}
+function ipv4ToInt(ip) {
+  if (!IPV4_RE.test(ip)) return null;
+  const parts = ip.split(".");
+  let n = 0;
+  for (const p of parts) {
+    const o = Number(p);
+    if (!Number.isInteger(o) || o < 0 || o > 255) return null;
+    n = n << 8 | o;
+  }
+  return n >>> 0;
+}
+function ipv4InCidr(ip, cidr) {
+  const [net, lenStr] = cidr.split("/");
+  const len = Number(lenStr);
+  if (!Number.isInteger(len) || len < 0 || len > 32) return false;
+  const ipInt = ipv4ToInt(ip);
+  const netInt = ipv4ToInt(net);
+  if (ipInt === null || netInt === null) return false;
+  if (len === 0) return true;
+  const mask = 4294967295 << 32 - len >>> 0;
+  return (ipInt & mask) === (netInt & mask);
+}
+function notExpired(entry, now) {
+  if (!entry.expiresAt) return true;
+  const t = Date.parse(entry.expiresAt);
+  return Number.isNaN(t) || t > now.getTime();
+}
+function matchBlocklist(rawIp, entries, now = /* @__PURE__ */ new Date()) {
+  const ip = normalizeIp(rawIp);
+  if (!ip || ip === "unknown") return null;
+  for (const entry of entries) {
+    if (!notExpired(entry, now)) continue;
+    if (entry.type === "IP") {
+      if (normalizeIp(entry.value) === ip) return entry;
+    } else if (entry.type === "CIDR") {
+      if (entry.value.includes("/") && IPV4_RE.test(entry.value.split("/")[0])) {
+        if (ipv4InCidr(ip, entry.value)) return entry;
+      }
+    }
+  }
+  return null;
+}
+
+// src/firewall/express.ts
+function defaultGetIp(req) {
+  const xff = req?.headers?.["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
+  const xri = req?.headers?.["x-real-ip"];
+  if (typeof xri === "string" && xri.length) return xri;
+  return req?.ip || req?.socket?.remoteAddress || "unknown";
+}
+function createExpressMiddleware(store, report, getIp = defaultGetIp) {
+  return function lunorFirewall(req, res, next) {
+    try {
+      const state = store.getState();
+      if (!state || state.mode === "OFF") return next();
+      const ip = normalizeIp(getIp(req));
+      const matched = matchBlocklist(ip, state.entries);
+      if (!matched) return next();
+      if (state.mode === "MONITOR") {
+        safeReport(report, "FIREWALL_WOULD_BLOCK", ip, matched.value, req);
+        return next();
+      }
+      safeReport(report, "FIREWALL_BLOCK", ip, matched.value, req);
+      res.status(403).json({ error: "Forbidden" });
+    } catch (err) {
+      console.warn("[Lunor firewall] middleware error (fail-open):", err);
+      try {
+        next();
+      } catch {
+      }
+    }
+  };
+}
+function safeReport(report, kind, ip, value, req) {
+  try {
+    report(kind, ip, value, req);
+  } catch (err) {
+    console.warn("[Lunor firewall] report error (ignoruj\u0119):", err);
+  }
+}
+
+// src/firewall/index.ts
+function deriveBlocklistUrl(endpoint) {
+  if (endpoint.endsWith("/api/webhook")) {
+    return endpoint.slice(0, -"/api/webhook".length) + "/api/firewall/blocklist";
+  }
+  try {
+    const u = new URL(endpoint);
+    return `${u.origin}/api/firewall/blocklist`;
+  } catch {
+    return endpoint;
+  }
+}
+function createFirewall(opts) {
+  const endpoint = opts.endpoint ?? LUNOR_ENDPOINT;
+  const store = new BlocklistStore({
+    apiKey: opts.apiKey,
+    apiSecret: opts.apiSecret,
+    blocklistUrl: deriveBlocklistUrl(endpoint),
+    pollIntervalMs: opts.pollIntervalMs,
+    snapshotPath: opts.snapshotPath
+  });
+  const report = (kind, ip, matchedValue, req) => {
+    opts.client.captureSecurityEvent({
+      type: kind === "FIREWALL_BLOCK" ? "FIREWALL_BLOCK" /* FIREWALL_BLOCK */ : "FIREWALL_WOULD_BLOCK" /* FIREWALL_WOULD_BLOCK */,
+      ipAddress: ip,
+      description: kind === "FIREWALL_BLOCK" ? `Firewall: zablokowano ${ip} (regu\u0142a ${matchedValue})` : `Firewall (monitor): zablokowa\u0142oby ${ip} (regu\u0142a ${matchedValue})`,
+      metadata: {
+        matchedValue,
+        method: req?.method,
+        path: req?.originalUrl ?? req?.url
+      }
+    });
+  };
+  return {
+    store,
+    express: () => createExpressMiddleware(store, report),
+    start: () => store.start(),
+    stop: () => store.stop()
+  };
+}
+
 // src/index.ts
 var _instance = null;
 function createLunorClient(config) {
@@ -1589,6 +1828,7 @@ var Lunor = {
   getInstance,
   destroy,
   createLunorClient,
+  createFirewall,
   LunorClient,
   LogLevel,
   ErrorType,
@@ -1602,6 +1842,7 @@ export {
   LunorClient,
   SecurityType,
   Severity,
+  createFirewall,
   createLunorClient,
   destroy,
   getInstance,

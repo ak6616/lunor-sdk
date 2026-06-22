@@ -7,6 +7,7 @@
 import { LunorClient } from "./client";
 import type { LunorConfig } from "./types";
 import { LogLevel, ErrorType, Severity, SecurityType } from "./types";
+import { createFirewall } from "./firewall";
 
 // ============================================================================
 // RE-EXPORTS
@@ -15,6 +16,8 @@ import { LogLevel, ErrorType, Severity, SecurityType } from "./types";
 export { LunorClient } from "./client";
 export { LogLevel, ErrorType, Severity, SecurityType } from "./types";
 export { scrubSensitive, scrubString, maskEmail } from "./scrubber";
+export { createFirewall } from "./firewall";
+export type { FirewallOptions } from "./firewall";
 
 export type {
   LunorConfig,
@@ -86,6 +89,7 @@ export const Lunor = {
   getInstance,
   destroy,
   createLunorClient,
+  createFirewall,
   LunorClient,
   LogLevel,
   ErrorType,

@@ -43,6 +43,8 @@ export enum SecurityType {
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
   INVALID_TOKEN = "INVALID_TOKEN",
   IP_BLACKLISTED = "IP_BLACKLISTED",
+  FIREWALL_BLOCK = "FIREWALL_BLOCK",
+  FIREWALL_WOULD_BLOCK = "FIREWALL_WOULD_BLOCK",
 }
 
 // ============================================================================

@@ -2,7 +2,13 @@
 
 import { LogLevel, type LunorConfig } from "./types";
 
-export const SDK_VERSION = "2.3.0";
+// __SDK_VERSION__ jest podmieniany przy buildzie (tsup `define`) na wersję z
+// package.json — jedno źródło prawdy, żeby wersja nie rozjechała się z paczką
+// (drift 2.3.1: package.json=2.3.1, a ten stały był ręcznie "2.3.0").
+// W środowisku testowym (vitest, bez define) fallback na "0.0.0-dev".
+declare const __SDK_VERSION__: string | undefined;
+export const SDK_VERSION =
+  typeof __SDK_VERSION__ !== "undefined" ? __SDK_VERSION__ : "0.0.0-dev";
 export const SDK_NAME = "lunor-sdk";
 
 // Twój prywatny endpoint — hardcoded, nie do nadpisania przez klientów

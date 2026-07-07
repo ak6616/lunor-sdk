@@ -1,6 +1,6 @@
 {
   "name": "@ak6616/lunor-sdk",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "Private monitoring SDK for Lunor platform",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

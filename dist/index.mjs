@@ -1,10 +1,3 @@
-var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
-}) : x)(function(x) {
-  if (typeof require !== "undefined") return require.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
-
 // src/types.ts
 var LogLevel = /* @__PURE__ */ ((LogLevel2) => {
   LogLevel2["DEBUG"] = "DEBUG";
@@ -837,6 +830,7 @@ var MiddlewareChain = class {
 };
 
 // src/context.ts
+import * as os from "os";
 function collectContext(config) {
   const runtime = detectRuntime();
   const context = {
@@ -868,7 +862,6 @@ function collectBrowserContext(context) {
 }
 function collectNodeContext(context) {
   try {
-    const os = __require("os");
     context.hostname = os.hostname();
     context.os = `${os.platform()} ${os.release()}`;
     context.nodeVersion = process.version;
@@ -1560,6 +1553,7 @@ var LunorClient = class {
 };
 
 // src/firewall/store.ts
+import * as fs from "fs";
 var DEFAULT_POLL = 45e3;
 var DEFAULT_TIMEOUT = 3e3;
 var MAX_BACKOFF = 3e5;
@@ -1636,12 +1630,14 @@ var BlocklistStore = class {
     }
   }
   // ---- Snapshot na dysku (opcjonalny; tylko długo-żyjące procesy / pizza) ----
-  // Guard `typeof require` — build ESM (tsup) nie ma `require`; tam snapshot
-  // jest po prostu nieaktywny (fail-open), zamiast rzucać ReferenceError.
+  // `fs` importowany statycznie z 'node:fs' — działa w obu buildach (cjs+esm).
+  // Wcześniej był runtime `require('node:fs')` z guardem `typeof require`, ale
+  // esbuild w buildzie ESM wstrzykuje shim `require` (guard przechodził), który
+  // przy wywołaniu rzucał "Dynamic require of fs is not supported" → snapshot
+  // był martwy na Lastorii (incydent 2026-07-06).
   loadSnapshot() {
-    if (!this.opts.snapshotPath || typeof __require !== "function") return;
+    if (!this.opts.snapshotPath) return;
     try {
-      const fs = __require("fs");
       if (!fs.existsSync(this.opts.snapshotPath)) return;
       const raw = fs.readFileSync(this.opts.snapshotPath, "utf8");
       const snap = JSON.parse(raw);
@@ -1653,9 +1649,8 @@ var BlocklistStore = class {
     }
   }
   saveSnapshot() {
-    if (!this.opts.snapshotPath || !this.state || typeof __require !== "function") return;
+    if (!this.opts.snapshotPath || !this.state) return;
     try {
-      const fs = __require("fs");
       fs.writeFileSync(this.opts.snapshotPath, JSON.stringify(this.state), "utf8");
     } catch (err) {
       this.log("nie uda\u0142o si\u0119 zapisa\u0107 snapshotu (ignoruj\u0119)", err);

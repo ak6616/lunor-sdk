@@ -879,6 +879,7 @@ var MiddlewareChain = class {
 };
 
 // src/context.ts
+var os = __toESM(require("os"));
 function collectContext(config) {
   const runtime = detectRuntime();
   const context = {
@@ -910,7 +911,6 @@ function collectBrowserContext(context) {
 }
 function collectNodeContext(context) {
   try {
-    const os = require("os");
     context.hostname = os.hostname();
     context.os = `${os.platform()} ${os.release()}`;
     context.nodeVersion = process.version;
@@ -1602,6 +1602,7 @@ var LunorClient = class {
 };
 
 // src/firewall/store.ts
+var fs = __toESM(require("fs"));
 var DEFAULT_POLL = 45e3;
 var DEFAULT_TIMEOUT = 3e3;
 var MAX_BACKOFF = 3e5;
@@ -1678,12 +1679,14 @@ var BlocklistStore = class {
     }
   }
   // ---- Snapshot na dysku (opcjonalny; tylko długo-żyjące procesy / pizza) ----
-  // Guard `typeof require` — build ESM (tsup) nie ma `require`; tam snapshot
-  // jest po prostu nieaktywny (fail-open), zamiast rzucać ReferenceError.
+  // `fs` importowany statycznie z 'node:fs' — działa w obu buildach (cjs+esm).
+  // Wcześniej był runtime `require('node:fs')` z guardem `typeof require`, ale
+  // esbuild w buildzie ESM wstrzykuje shim `require` (guard przechodził), który
+  // przy wywołaniu rzucał "Dynamic require of fs is not supported" → snapshot
+  // był martwy na Lastorii (incydent 2026-07-06).
   loadSnapshot() {
-    if (!this.opts.snapshotPath || typeof require !== "function") return;
+    if (!this.opts.snapshotPath) return;
     try {
-      const fs = require("fs");
       if (!fs.existsSync(this.opts.snapshotPath)) return;
       const raw = fs.readFileSync(this.opts.snapshotPath, "utf8");
       const snap = JSON.parse(raw);
@@ -1695,9 +1698,8 @@ var BlocklistStore = class {
     }
   }
   saveSnapshot() {
-    if (!this.opts.snapshotPath || !this.state || typeof require !== "function") return;
+    if (!this.opts.snapshotPath || !this.state) return;
     try {
-      const fs = require("fs");
       fs.writeFileSync(this.opts.snapshotPath, JSON.stringify(this.state), "utf8");
     } catch (err) {
       this.log("nie uda\u0142o si\u0119 zapisa\u0107 snapshotu (ignoruj\u0119)", err);

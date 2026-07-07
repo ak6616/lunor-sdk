@@ -1,5 +1,6 @@
 // src/context.ts
 
+import * as os from "node:os";
 import type { ContextData, LunorConfig } from "./types";
 import { detectRuntime, isBrowser, isNode } from "./utils";
 
@@ -46,7 +47,6 @@ function collectBrowserContext(context: ContextData): void {
 
 function collectNodeContext(context: ContextData): void {
   try {
-    const os = require("os");
     context.hostname = os.hostname();
     context.os = `${os.platform()} ${os.release()}`;
     context.nodeVersion = process.version;

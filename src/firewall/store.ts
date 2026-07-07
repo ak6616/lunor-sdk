@@ -1,3 +1,4 @@
+import * as fs from 'node:fs'
 import { signRequest } from '../hmac'
 import { HEADER_API_KEY } from '../constants'
 import type { BlockEntryLite } from './matcher'
@@ -116,12 +117,14 @@ export class BlocklistStore {
   }
 
   // ---- Snapshot na dysku (opcjonalny; tylko długo-żyjące procesy / pizza) ----
-  // Guard `typeof require` — build ESM (tsup) nie ma `require`; tam snapshot
-  // jest po prostu nieaktywny (fail-open), zamiast rzucać ReferenceError.
+  // `fs` importowany statycznie z 'node:fs' — działa w obu buildach (cjs+esm).
+  // Wcześniej był runtime `require('node:fs')` z guardem `typeof require`, ale
+  // esbuild w buildzie ESM wstrzykuje shim `require` (guard przechodził), który
+  // przy wywołaniu rzucał "Dynamic require of fs is not supported" → snapshot
+  // był martwy na Lastorii (incydent 2026-07-06).
   private loadSnapshot(): void {
-    if (!this.opts.snapshotPath || typeof require !== 'function') return
+    if (!this.opts.snapshotPath) return
     try {
-      const fs = require('node:fs') as typeof import('node:fs')
       if (!fs.existsSync(this.opts.snapshotPath)) return
       const raw = fs.readFileSync(this.opts.snapshotPath, 'utf8')
       const snap = JSON.parse(raw) as FirewallState
@@ -134,9 +137,8 @@ export class BlocklistStore {
   }
 
   private saveSnapshot(): void {
-    if (!this.opts.snapshotPath || !this.state || typeof require !== 'function') return
+    if (!this.opts.snapshotPath || !this.state) return
     try {
-      const fs = require('node:fs') as typeof import('node:fs')
       fs.writeFileSync(this.opts.snapshotPath, JSON.stringify(this.state), 'utf8')
     } catch (err) {
       this.log('nie udało się zapisać snapshotu (ignoruję)', err)

@@ -30,13 +30,16 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/backup/index.ts
 var backup_exports = {};
 __export(backup_exports, {
+  ArtifactAuthenticationError: () => ArtifactAuthenticationError,
+  InvalidArtifactError: () => InvalidArtifactError,
   MAGIC: () => MAGIC,
   createBackup: () => createBackup,
   createPostgresEngine: () => createPostgresEngine,
   decide: () => decide,
   jitterMinutes: () => jitterMinutes,
   keyFingerprint: () => keyFingerprint,
-  parseEncryptionKey: () => parseEncryptionKey
+  parseEncryptionKey: () => parseEncryptionKey,
+  restoreArtifact: () => restoreArtifact
 });
 module.exports = __toCommonJS(backup_exports);
 
@@ -501,6 +504,154 @@ function createPostgresEngine(databaseUrl) {
   return new PostgresDumpEngine({ databaseUrl });
 }
 
+// src/backup/restore.ts
+var import_node_crypto2 = require("crypto");
+var import_node_zlib2 = require("zlib");
+var import_node_stream2 = require("stream");
+var import_promises = require("stream/promises");
+var IV_BYTES2 = 12;
+var AUTH_TAG_BYTES = 16;
+var HEADER_BYTES = MAGIC.length + IV_BYTES2;
+var InvalidArtifactError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "InvalidArtifactError";
+  }
+};
+var ArtifactAuthenticationError = class extends Error {
+  constructor() {
+    super(
+      "Nie uda\u0142o si\u0119 uwierzytelni\u0107 artefaktu. Najcz\u0119stsze przyczyny: z\u0142y klucz szyfruj\u0105cy albo uszkodzony/obci\u0119ty plik."
+    );
+    this.name = "ArtifactAuthenticationError";
+  }
+};
+var DecryptTransform = class extends import_node_stream2.Transform {
+  constructor(key) {
+    super();
+    this.key = key;
+    this.buf = Buffer.alloc(0);
+    this.decipher = null;
+  }
+  _transform(chunk, _enc, cb) {
+    this.buf = Buffer.concat([this.buf, chunk]);
+    if (!this.decipher) {
+      if (this.buf.length < HEADER_BYTES) {
+        cb();
+        return;
+      }
+      const magic = this.buf.subarray(0, MAGIC.length);
+      if (!magic.equals(MAGIC)) {
+        cb(
+          new InvalidArtifactError(
+            `To nie jest artefakt Lunora \u2014 oczekiwano magii ${JSON.stringify(
+              MAGIC.toString("utf8")
+            )}, jest ${JSON.stringify(magic.toString("utf8").replace(/[^\x20-\x7e]/g, "?"))}.`
+          )
+        );
+        return;
+      }
+      const iv = this.buf.subarray(MAGIC.length, HEADER_BYTES);
+      this.decipher = (0, import_node_crypto2.createDecipheriv)("aes-256-gcm", this.key, iv);
+      this.buf = this.buf.subarray(HEADER_BYTES);
+    }
+    if (this.buf.length > AUTH_TAG_BYTES) {
+      const ciphertext = this.buf.subarray(0, this.buf.length - AUTH_TAG_BYTES);
+      this.buf = this.buf.subarray(this.buf.length - AUTH_TAG_BYTES);
+      try {
+        this.push(this.decipher.update(ciphertext));
+      } catch (err) {
+        cb(err);
+        return;
+      }
+    }
+    cb();
+  }
+  _flush(cb) {
+    if (!this.decipher) {
+      cb(
+        new InvalidArtifactError(
+          `Artefakt jest kr\xF3tszy ni\u017C nag\u0142\xF3wek (${HEADER_BYTES} B) \u2014 plik jest obci\u0119ty albo pusty.`
+        )
+      );
+      return;
+    }
+    if (this.buf.length !== AUTH_TAG_BYTES) {
+      cb(
+        new InvalidArtifactError(
+          `Artefakt jest obci\u0119ty: zosta\u0142o ${this.buf.length} B zamiast ${AUTH_TAG_BYTES} B znacznika uwierzytelniaj\u0105cego.`
+        )
+      );
+      return;
+    }
+    try {
+      this.decipher.setAuthTag(this.buf);
+      this.push(this.decipher.final());
+      cb();
+    } catch {
+      cb(new ArtifactAuthenticationError());
+    }
+  }
+};
+function hasher(hash) {
+  return new import_node_stream2.Transform({
+    transform(chunk, _enc, cb) {
+      hash.update(chunk);
+      cb(null, chunk);
+    }
+  });
+}
+async function restoreArtifact(opts) {
+  const key = parseEncryptionKey(opts.encryptionKeyHex);
+  const hash = (0, import_node_crypto2.createHash)("sha256");
+  let sizeBytes = 0;
+  let plaintextBytes = 0;
+  const counter = new import_node_stream2.Transform({
+    transform(chunk, _enc, cb) {
+      sizeBytes += chunk.length;
+      cb(null, chunk);
+    }
+  });
+  const sink = opts.sink ?? new import_node_stream2.Transform({
+    transform(_chunk, _enc, cb) {
+      cb();
+    }
+  });
+  const counted = new import_node_stream2.Transform({
+    transform(chunk, _enc, cb) {
+      plaintextBytes += chunk.length;
+      cb(null, chunk);
+    }
+  });
+  try {
+    await (0, import_promises.pipeline)(
+      opts.source,
+      hasher(hash),
+      counter,
+      new DecryptTransform(key),
+      (0, import_node_zlib2.createGunzip)(),
+      counted,
+      sink
+    );
+  } catch (err) {
+    if (err instanceof InvalidArtifactError || err instanceof ArtifactAuthenticationError) {
+      throw err;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    if (/unable to authenticate|unsupported state/i.test(message)) {
+      throw new ArtifactAuthenticationError();
+    }
+    throw err;
+  }
+  const checksum = hash.digest("hex");
+  if (opts.expectedChecksum && opts.expectedChecksum !== checksum) {
+    throw new InvalidArtifactError(
+      `Suma kontrolna si\u0119 nie zgadza: oczekiwano ${opts.expectedChecksum}, policzono ${checksum}. Artefakt jest uszkodzony albo podmieniony.`
+    );
+  }
+  return { checksum, sizeBytes, plaintextBytes };
+}
+
 // src/backup/index.ts
 var DEFAULT_CHECK_INTERVAL_MS = 5 * 6e4;
 var HEARTBEAT_INTERVAL_MS = 6e4;
@@ -652,12 +803,15 @@ function createBackup(opts) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ArtifactAuthenticationError,
+  InvalidArtifactError,
   MAGIC,
   createBackup,
   createPostgresEngine,
   decide,
   jitterMinutes,
   keyFingerprint,
-  parseEncryptionKey
+  parseEncryptionKey,
+  restoreArtifact
 });
 //# sourceMappingURL=index.js.map

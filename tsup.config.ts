@@ -8,7 +8,9 @@ const pkg = JSON.parse(
 ) as { version: string };
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  // Osobne wejście dla modułu backupu: ciągnie Node-owe API (child_process,
+  // zlib, crypto), więc nie może trafić do buildu przeglądarkowego.
+  entry: ["src/index.ts", "src/backup/index.ts"],
   format: ["cjs", "esm"],
   dts: true,
   clean: true,

@@ -93,7 +93,7 @@ var SecurityType = /* @__PURE__ */ ((SecurityType2) => {
 })(SecurityType || {});
 
 // src/constants.ts
-var SDK_VERSION = true ? "2.3.2" : "0.0.0-dev";
+var SDK_VERSION = true ? "2.4.0" : "0.0.0-dev";
 var SDK_NAME = "lunor-sdk";
 var LUNOR_ENDPOINT = "https://www.lunor.com.pl/api/webhook";
 var DEFAULT_CONFIG = {

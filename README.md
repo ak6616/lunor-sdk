@@ -77,3 +77,78 @@ Projekt został zaprojektowany w sposób modułowy:
 
 ## Konfiguracja
 SDK wymaga podania `apiKey` oraz `apiSecret` przy inicjalizacji. Większość parametrów (batchSize, flushInterval, sampleRate) jest opcjonalna i posiada bezpieczne wartości domyślne zdefiniowane w `constants.ts`.
+
+## Moduł backupów (`@ak6616/lunor-sdk/backup`)
+
+Agent wykonujący kopie zapasowe bazy aplikacji i wysyłający je do zewnętrznego
+storage. **Opt-in** — bez konfiguracji nic nie robi. Import z osobnej ścieżki,
+bo moduł używa API Node (`child_process`, `zlib`, `crypto`) i nie może trafić
+do buildu przeglądarkowego.
+
+```ts
+import { createBackup } from '@ak6616/lunor-sdk/backup'
+
+const backup = createBackup({
+  apiKey: process.env.LUNOR_API_KEY!,
+  apiSecret: process.env.LUNOR_API_SECRET!,
+  databaseUrl: process.env.DATABASE_URL!,
+  encryptionKey: process.env.LUNOR_BACKUP_KEY!,   // 64 znaki hex
+  statePath: '/var/lib/myapp/lunor-backup.json',  // musi przetrwać restart
+})
+
+backup.start()
+process.on('SIGTERM', () => backup.stop())
+```
+
+### Wymagania
+
+- **`pg_dump` w `PATH`**, w wersji nie starszej niż serwer bazy (starszy klient
+  odmówi zrzutu nowszego serwera).
+- **`statePath`** na trwałym wolumenie. Bez niego restart procesu gubi
+  harmonogram i agent zrobi kopię przy każdym starcie.
+- Harmonogram, retencja i włącznik są **po stronie Lunora** — agent tylko
+  odpytuje politykę.
+
+### 🔴 Klucz szyfrujący
+
+Artefakt jest szyfrowany **przed** opuszczeniem maszyny (AES-256-GCM), więc
+Lunor przechowuje nieczytelny blob i **nie zna klucza**.
+
+**Utrata klucza = utrata wszystkich kopii, także już wykonanych.** Nikt ich nie
+odzyska — ani my, ani dostawca storage. Klucz trzymać poza tym systemem
+(menedżer haseł, wydruk w sejfie), a nie tylko w zmiennej środowiskowej na
+maszynie, którą backupujemy.
+
+Wygenerowanie: `openssl rand -hex 32`
+
+Bez `encryptionKey` moduł **odmawia startu** — nigdy nie wyśle kopii
+nieszyfrowanej.
+
+### Odtworzenie kopii
+
+Artefakt ma format `[8B "LUNORBK1"][12B IV][szyfrogram][16B authTag]`. IV i
+authTag są częścią pliku — bez nich odszyfrowanie jest niemożliwe.
+
+```bash
+# 1. Odszyfrowanie i rozpakowanie (KEY = ten sam hex co w agencie)
+node -e '
+const {createDecipheriv}=require("crypto"),{gunzipSync}=require("zlib"),fs=require("fs");
+const a=fs.readFileSync(process.argv[1]), key=Buffer.from(process.env.KEY,"hex");
+const d=createDecipheriv("aes-256-gcm",key,a.subarray(8,20));
+d.setAuthTag(a.subarray(a.length-16));
+fs.writeFileSync("dump.sql",gunzipSync(Buffer.concat([d.update(a.subarray(20,a.length-16)),d.final()])));
+' artefakt.dump.gz.enc
+
+# 2. Odtworzenie
+psql -d baza_docelowa -f dump.sql
+```
+
+⚠️ **Backup bez przetestowanego odtworzenia to teatr.** Przećwicz powyższe na
+bazie testowej, zanim uznasz funkcję za działającą.
+
+### Fail-open
+
+Żaden błąd backupu nie może wywrócić aplikacji, w której agent siedzi.
+Niedostępny Lunor, padnięty `pg_dump`, odrzucony upload, brak miejsca — każdy
+z tych przypadków kończy się wpisem w logu i meldunkiem porażki do Lunora,
+nigdy wyjątkiem lecącym do procesu hosta.

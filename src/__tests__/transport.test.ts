@@ -74,6 +74,13 @@ describe("Transport", () => {
     });
 
     it("does not treat 429 as non-retryable — retries and eventually throws", async () => {
+      // Prawdziwe timery: backoff to tu 10–20 ms, więc udawanie czasu nic nie
+      // oszczędza, a wprowadza wyścig. `doSend` czeka na `signRequest`
+      // (WebCrypto), przez co timer backoffu powstaje dopiero po realnej
+      // operacji asynchronicznej — pod obciążeniem drenaż fake timerów kończył
+      // się wcześniej i test wisiał do 5-sekundowego timeoutu.
+      vi.useRealTimers();
+
       global.fetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 429,
@@ -81,18 +88,22 @@ describe("Transport", () => {
       });
 
       const t = new Transport(makeConfig({ maxRetries: 1 }), logger);
-      const promise = t.send(makePayload());
-      const caught = promise.catch((e: Error) => e);
-      await vi.runAllTimersAsync();
+      const err = await t.send(makePayload()).catch((e: Error) => e);
 
-      // 429 is retried, so after exhausting retries withRetry throws (not a noRetry return)
-      const err = await caught;
+      // Rzut, a nie `{success:false}` — 429 idzie ścieżką ponawianą.
+      expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain("HTTP 429");
+      // Sedno testu: próba pierwotna + jedno ponowienie. Gdyby 429 wpadło
+      // do gałęzi `noRetry`, wywołanie byłoby dokładnie jedno.
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
   });
 
   describe("send — 5xx server errors (retried)", () => {
     it("retries and eventually returns failure after max retries for 500", async () => {
+      // Prawdziwe timery — powód jak przy teście 429 wyżej.
+      vi.useRealTimers();
+
       global.fetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
@@ -100,36 +111,47 @@ describe("Transport", () => {
       });
 
       const t = new Transport(makeConfig({ maxRetries: 1 }), logger);
-      const promise = t.send(makePayload());
-      const caught = promise.catch((e: Error) => e);
-      await vi.runAllTimersAsync();
-      const err = await caught;
+      const err = await t.send(makePayload()).catch((e: Error) => e);
+
+      expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain("HTTP 500");
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
   });
 
   describe("send — timeout", () => {
     it("aborts the request when timeout is exceeded", async () => {
+      // Atrapa musi odwzorować `fetch` także wtedy, gdy sygnał jest JUŻ
+      // przerwany w momencie wywołania — prawdziwy `fetch` odrzuca wtedy
+      // natychmiast, zamiast czekać na zdarzenie `abort`.
+      //
+      // To nie jest szczegół: `doSend` planuje timeout PRZED `await
+      // signRequest` (WebCrypto), więc przy timeoucie 100 ms `abort()` odpala
+      // się, zanim wykonanie dojdzie do `fetch`. Poprzednia wersja
+      // rejestrowała wtedy nasłuch na zdarzenie, które już się wydarzyło —
+      // promise nigdy się nie rozstrzygał i test wisiał do 5-sekundowego
+      // timeoutu vitesta.
       global.fetch = vi.fn().mockImplementation(
         (_url: string, options: { signal?: AbortSignal }) => {
+          const abortError = () =>
+            new DOMException("The operation was aborted.", "AbortError");
+
+          if (options?.signal?.aborted) {
+            return Promise.reject(abortError());
+          }
+
           return new Promise((_resolve, reject) => {
-            if (options?.signal) {
-              options.signal.addEventListener("abort", () => {
-                reject(new DOMException("The operation was aborted.", "AbortError"));
-              });
-            }
+            options?.signal?.addEventListener("abort", () => reject(abortError()));
           });
         }
       );
 
       const t = new Transport(makeConfig({ timeout: 100, maxRetries: 0 }), logger);
-      const promise = t.send(makePayload());
-
-      // Attach rejection handler BEFORE advancing timers to avoid unhandled rejection
-      const caught = promise.catch((e: Error) => e);
+      // `.catch` podpięty od razu — inaczej między `send` a asercją byłoby
+      // okno na „unhandled rejection".
+      const caught = t.send(makePayload()).catch((e: Error) => e);
 
       vi.advanceTimersByTime(200);
-      await vi.runAllTimersAsync();
 
       const err = await caught;
       expect(err).toBeInstanceOf(Error);

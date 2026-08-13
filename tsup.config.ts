@@ -10,7 +10,9 @@ const pkg = JSON.parse(
 export default defineConfig({
   // Osobne wejście dla modułu backupu: ciągnie Node-owe API (child_process,
   // zlib, crypto), więc nie może trafić do buildu przeglądarkowego.
-  entry: ["src/index.ts", "src/backup/index.ts"],
+  // `cli.ts` jako osobne wejście: narzędzie odtwarzania musi dać się
+  // uruchomić bez wciągania go do biblioteki (i odwrotnie).
+  entry: ["src/index.ts", "src/backup/index.ts", "src/backup/cli.ts"],
   format: ["cjs", "esm"],
   dts: true,
   clean: true,

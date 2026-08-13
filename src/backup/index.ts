@@ -197,6 +197,15 @@ export function createBackup(opts: BackupOptions): BackupAgent {
 }
 
 export { keyFingerprint, parseEncryptionKey, MAGIC } from './pipeline'
+// Odtwarzanie wystawione z biblioteki, nie tylko z CLI: pozwala wpiąć
+// weryfikację kopii we własny harmonogram albo w testy integracyjne.
+export {
+  restoreArtifact,
+  InvalidArtifactError,
+  ArtifactAuthenticationError,
+  type RestoreOptions,
+  type RestoreResult,
+} from './restore'
 export { createPostgresEngine } from './engine-postgres'
 export { decide, jitterMinutes } from './scheduler'
 export type {

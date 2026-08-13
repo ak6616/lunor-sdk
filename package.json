@@ -44,5 +44,8 @@
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
     "access": "restricted"
+  },
+  "bin": {
+    "lunor-backup": "./dist/backup/cli.js"
   }
 }

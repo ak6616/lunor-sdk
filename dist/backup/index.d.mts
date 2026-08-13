@@ -1,3 +1,5 @@
+import { Readable, Writable } from 'node:stream';
+
 /** Polityka pobrana z Lunora (`GET /api/backup/config`). */
 interface BackupConfig {
     enabled: boolean;
@@ -79,6 +81,43 @@ declare function parseEncryptionKey(hex: string): Buffer;
  */
 declare function keyFingerprint(hex: string): string;
 
+declare class InvalidArtifactError extends Error {
+    constructor(message: string);
+}
+declare class ArtifactAuthenticationError extends Error {
+    constructor();
+}
+interface RestoreResult {
+    /** sha256 CAŁEGO artefaktu — porównywalny z `BackupRun.checksum`. */
+    checksum: string;
+    /** Rozmiar artefaktu w bajtach. */
+    sizeBytes: number;
+    /** Bajty zrzutu SQL po odszyfrowaniu i dekompresji. */
+    plaintextBytes: number;
+}
+interface RestoreOptions {
+    /** Strumień artefaktu (plik, odpowiedź HTTP). */
+    source: Readable;
+    /** Klucz szyfrujący — ten sam hex, którym artefakt powstał. */
+    encryptionKeyHex: string;
+    /**
+     * Dokąd trafia odszyfrowany zrzut SQL. Pominięcie = tryb weryfikacji:
+     * artefakt jest w pełni odszyfrowany i sprawdzony, ale nigdzie nie zapisany.
+     */
+    sink?: Writable;
+    /** Jeśli podany, rozjazd sumy kontrolnej jest błędem. */
+    expectedChecksum?: string;
+}
+/**
+ * Odszyfrowuje i dekompresuje artefakt, pisząc zrzut SQL do `sink`.
+ *
+ * Bez `sink` działa jako **weryfikacja**: przepuszcza całość przez deszyfrator
+ * i gunzip, więc dowodzi, że plik jest odtwarzalny tym kluczem — nie zapisując
+ * ani bajtu. To jest test, który powinien chodzić regularnie, a nie w dniu
+ * awarii.
+ */
+declare function restoreArtifact(opts: RestoreOptions): Promise<RestoreResult>;
+
 /**
  * Connection string rozkładany na zmienne libpq (patrz `connectionEnv`).
  * Hasło trafia wyłącznie do `PGPASSWORD`, nigdy do argv.
@@ -109,4 +148,4 @@ declare function decide(params: {
 
 declare function createBackup(opts: BackupOptions): BackupAgent;
 
-export { type BackupAgent, type BackupConfig, type BackupOptions, type BackupState, type DumpEngine, type DumpHandle, MAGIC, createBackup, createPostgresEngine, decide, jitterMinutes, keyFingerprint, parseEncryptionKey };
+export { ArtifactAuthenticationError, type BackupAgent, type BackupConfig, type BackupOptions, type BackupState, type DumpEngine, type DumpHandle, InvalidArtifactError, MAGIC, type RestoreOptions, type RestoreResult, createBackup, createPostgresEngine, decide, jitterMinutes, keyFingerprint, parseEncryptionKey, restoreArtifact };

@@ -1,7 +1,7 @@
 {
   "name": "@ak6616/lunor-sdk",
   "version": "2.4.0",
-  "description": "Private monitoring SDK for Lunor platform",
+  "description": "Monitoring, logging and edge-protection SDK for the Lunor observability platform",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -47,5 +47,17 @@
   },
   "bin": {
     "lunor-backup": "./dist/backup/cli.js"
-  }
+  },
+  "license": "UNLICENSED",
+  "homepage": "https://github.com/ak6616/lunor-sdk#readme",
+  "keywords": [
+    "logging",
+    "monitoring",
+    "observability",
+    "error-tracking",
+    "firewall",
+    "typescript",
+    "nodejs",
+    "browser"
+  ]
 }
